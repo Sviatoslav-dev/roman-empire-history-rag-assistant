@@ -1,4 +1,4 @@
-# roman-empire-rag-assistant
+# Roman Empire History RAG Assistant
 A chat-based system that helps users explore the history of the Roman Empire by providing contextual answers supported by text and images
 
 ## Project Goal
