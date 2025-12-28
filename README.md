@@ -32,15 +32,16 @@ Images are linked to the same article and paragraph as the corresponding text
 
 ## Example Queries
 1. What are the main periods in the history of the Roman Empire?
-2. What did the borders look like during the period of the empire’s greatest territorial extent?
-3. Who was Trajan?
-4. How did the form of government differ between the Republican period and the Imperial period?
-5. What were the Western and Eastern Roman Empires?
-6. Why was the capital moved from Rome to Constantinople?
-7. Why did the Roman Empire collapse?
-8. What did the borders of the Western and Eastern Roman Empires look like?
-9. Name the most famous rulers of the Roman Empire.
-10. How did Roman coinage change during the reign of Augustus?
+2. What is this? (in the photo)
+3. What did the borders look like during the period of the empire’s greatest territorial extent?
+4. Who was Trajan?
+5. Who is depicted in this image?
+6. Which century does this belong to? (in the image)
+7. Find similar artifacts (to the attached image)
+8. Why was the capital moved from Rome to Constantinople?
+9. Why did the Roman Empire collapse?
+10. What did the borders of the Western and Eastern Roman Empires look like?
+11. How did Roman coinage change during the reign of Augustus?
 
 ## Success Metrics
 **Retrieval relevance:** top-k results contain the correct source for at least 70% of test queries
