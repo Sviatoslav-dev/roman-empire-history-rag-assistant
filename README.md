@@ -122,6 +122,7 @@ This alignment enables paragraph-level association between textual content and v
 5. Why was the capital moved from Rome to Constantinople?
 
 **Image-Centric - 5 queries:**
+
 6. What did the borders look like during the empire's greatest territorial extent?
 7. What did the borders of the Western and Eastern Roman Empires look like?
 8. Show me a map of the Roman road network
@@ -129,11 +130,13 @@ This alignment enables paragraph-level association between textual content and v
 10. Show me examples of Roman architecture
 
 **Conversational/Follow-up - 3 queries:**
+
 11. "Who was Augustus?" → "When did he rule?" → "What were his major achievements?"
 12. "Tell me about the Punic Wars" → "Who was Hannibal?" → "Show me a map of his route"
 13. "What was the Praetorian Guard?" → "Who commanded them?"
 
 **Complex/Analytical - 2 queries:**
+
 14. Compare the military strategies of Julius Caesar and Pompey
 15. How did Roman coinage change from the Republic to the Empire?
 
@@ -278,11 +281,12 @@ Users should be able to see:
 - Each chat has unique session_id
 - Store messages: [{role, content, timestamp, sources}]
 - Store metadata: {topic, key_entities, created_at}
-1. Query Rewriting
-2. Entity Tracking:
+2. Query Rewriting.
+  
+3. Entity Tracking:
 - Track mentioned entities (emperors, battles, places)
 - Resolve pronouns: "he" → "Augustus", "it" → "Roman Empire"
-1. Context Window Management:
+4. Context Window Management:
 - Include last N messages (N=5 recommended)
 - Summarize older messages if chat is long
 - Avoid context overflow (stay within token limits)
@@ -306,22 +310,6 @@ User: "What about Julius Caesar?"
 → Retrieval: "Julius Caesar"
 
 ```
-
-### Multimodal Retrieval Architecture
-
-**Dual-Collection Approach:**
-
-**Collection 1: Text Chunks**
-
-- Source: Wikipedia article sections
-- Embedding: sentence-transformers/all-MiniLM-L6-v2
-- Metadata: {article_title, section, url, related_images}
-
-**Collection 2: Image Embeddings**
-
-- Source: Wikipedia images (Commons)
-- Embedding: OpenCLIP (ViT-B/32)
-- Metadata: {caption, article, license, attribution}
 
 ### Multimodal Retrieval Strategy
 
@@ -349,7 +337,7 @@ Textual and visual results are not derived from one another and do not depend on
 When a query includes both text and image input, each modality is processed independently.
 The text input is used for semantic text retrieval, while the image input is used to retrieve visually similar images. Retrieved images will additionally contribute related textual context through their associated captions or article sections. All results are merged at the application level into a unified multimodal context.
 
-## Backend Architecture
+### Backend Architecture
 ```
 ┌─────────────────────────────────────┐
 │         Streamlit UI                │
