@@ -350,7 +350,7 @@ When a query includes both text and image input, each modality is processed inde
 The text input is used for semantic text retrieval, while the image input is used to retrieve visually similar images. Retrieved images will additionally contribute related textual context through their associated captions or article sections. All results are merged at the application level into a unified multimodal context.
 
 ## Backend Architecture
-
+```
 ┌─────────────────────────────────────┐
 │         Streamlit UI                │
 ├─────────────────────────────────────┤
@@ -373,7 +373,7 @@ The text input is used for semantic text retrieval, while the image input is use
 │            Qdrant                   │
 │  (Vector embeddings)                │
 └─────────────────────────────────────┘
-
+```
 ## Data Ingestion
 
 Phase 1: Article Collection
