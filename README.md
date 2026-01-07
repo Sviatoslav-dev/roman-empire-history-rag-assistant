@@ -86,8 +86,8 @@ Only images with permissive or attribution-based licenses are included(e.g. Publ
 Images classified as non-free content (e.g. fair use, NC, ND, Wikipedia-only, or “all rights reserved”) are excluded from the dataset.
 
 To ensure dataset quality and consistency, articles are filtered using the following criteria:
-- Article length exceeds 5,000 characters
-- Contains at least 5 citations
+- Article length exceeds 2,000 characters
+- Contains at least 3 citations
 - Not marked as dispute and not marked with a Problem or Update box
 - Available in the English Wikipedia
 
