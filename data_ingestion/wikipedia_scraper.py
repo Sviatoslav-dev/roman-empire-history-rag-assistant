@@ -1,4 +1,3 @@
-"""Wikipedia API client for fetching articles, sections, and images."""
 from __future__ import annotations
 
 import os
@@ -6,18 +5,19 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 from urllib.parse import unquote
 
-import requests
-import wikipedia
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from tqdm import tqdm
 
+from data_ingestion.wikipedia_api_client import WikipediaApiClient
+from logger import get_logger
+
 load_dotenv()
 
-BASE_URL = "https://en.wikipedia.org"
+logger = get_logger(__name__)
 
 
-class WikipediaClient:
+class WikipediaScraper:
     """
     Client for fetching Wikipedia articles and images.
 
@@ -29,46 +29,25 @@ class WikipediaClient:
 
     def __init__(self) -> None:
         """Initialize Wikipedia client."""
-        wikipedia.set_lang("en")
         # Use configured IMAGES_DIR or sensible default 'images' in repo root
-        images_dir = os.getenv("IMAGES_DIR") or "images"
-        self.images_dir = Path(images_dir)
-        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.articles_dir = Path(os.getenv("ARTICLES_DIR"))
+        self.wikipedia_client = WikipediaApiClient()
 
     def get_all_articles_from_categories(
         self,
         categories: list[str],
     ) -> Set[str]:
-        visited_categories = set()
         articles = set()
 
         for category in categories:
-            norm_category = category.lower().replace("_", " ").strip()
+            logger.info(f"Crawling category: {category}")
 
-            print(f"Crawling category: {category}")
+            category_html = self.wikipedia_client.fetch_category(category)
 
-            if norm_category in visited_categories:
-                continue
+            soup = BeautifulSoup(category_html, "html.parser")
 
-            visited_categories.add(norm_category)
-
-            url = f"{BASE_URL}/wiki/Category:{category.replace(' ', '_')}"
-            response = requests.get(
-                url,
-                headers={
-                    "User-Agent": "RomanEmpireResearchBot/1.0 (contact: your-email@example.com)"
-                },
-            )
-            response.raise_for_status()
-
-            soup = BeautifulSoup(response.text, "html.parser")
-
-            # 1️⃣ Articles
-            for group in soup.select("#mw-pages .mw-category-group"):
-                for link in group.select("a[href^='/wiki/']"):
-                    title = unquote(link["href"]).replace("/wiki/", "")
-                    if ":" not in title:
-                        articles.add(title.replace("_", " "))
+            # extract articles via helper
+            articles.update(self._extract_articles_from_soup(soup))
         return articles
 
 
@@ -88,44 +67,21 @@ class WikipediaClient:
         }
         or None on error.
         """
-        articles_dir = Path(os.getenv("ARTICLES_DIR") or "articles")
-        articles_dir.mkdir(parents=True, exist_ok=True)
+        self.articles_dir.mkdir(parents=True, exist_ok=True)
 
-        # Sanitize filename
-        safe_name = unquote(title).replace(" ", "_")
-        safe_name = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in safe_name)
-        file_path = articles_dir / f"{safe_name}.html"
+        safe_name = self._safe_filename(title)
+        file_path = self.articles_dir / f"{safe_name}.html"
 
         if file_path.exists():
             return {"title": title, "path": str(file_path), "downloaded": False}
 
-        try:
-            page = wikipedia.page(title, auto_suggest=False)
-        except wikipedia.exceptions.DisambiguationError as e:
-            if e.options:
-                return self.fetch_page(e.options[0])
-            return None
-        except Exception as e:
-            print(f"Error fetching page '{title}': {e}")
+        page_html = self.wikipedia_client.fetch_article(title)
+
+        written = self._write_html(file_path, page_html)
+        if not written:
             return None
 
-        try:
-            html = page.html()
-        except Exception as e:
-            print(f"Error getting HTML for '{title}': {e}")
-            return None
-
-        if not html:
-            print(f"Warning: No HTML content for '{title}'")
-            return None
-
-        try:
-            file_path.write_text(html, encoding="utf-8")
-        except Exception as e:
-            print(f"Error writing HTML for '{title}' to '{file_path}': {e}")
-            return None
-
-        return {"title": page.title, "path": str(file_path), "downloaded": True}
+        return {"title": title, "path": str(file_path), "downloaded": True}
 
 
     def fetch_pages_by_titles(self, titles: List[str]) -> List[Dict]:
@@ -139,6 +95,118 @@ class WikipediaClient:
                 results.append(res)
             time.sleep(0.5)  # polite rate limiting
         return results
+
+    def filter_downloaded_articles(self, paths: Optional[List[str]] = None) -> List[Dict]:
+        """Scan downloaded HTML files and return entries with pass/fail and reasons.
+
+        Behavior changes / enhancements:
+        - Looks for articles in multiple likely locations: ARTICLES_DIR env, './articles', and 'data/articles' next to this module.
+        - Returns a list of all scanned article entries (each with title/path/passes/reasons) so callers can inspect failures.
+        """
+        files = self._find_article_files(paths)
+
+        if not files:
+            logger.warning("No article HTML files found in ARTICLES_DIR, ./articles, or data/articles; searched:")
+            # log candidates for debugging
+            env_dir = os.getenv("ARTICLES_DIR")
+            candidates = []
+            if env_dir:
+                candidates.append(Path(env_dir))
+            candidates.append(Path("articles"))
+            candidates.append(Path(__file__).resolve().parent / "data" / "articles")
+            for c in candidates:
+                logger.info(" - %s", c)
+            return []
+
+        results: List[Dict] = []
+        for fp in files:
+            entry = self._assess_article(fp)
+            if entry is not None:
+                results.append(entry)
+        return results
+
+
+    # --- Small helper utilities ---------------------------------------
+    def _safe_filename(self, title: str) -> str:
+        """Return a filesystem-safe filename (without extension) for a title."""
+        safe_name = unquote(title).replace(" ", "_")
+        safe_name = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in safe_name)
+        return safe_name
+
+    def _write_html(self, file_path: Path, html: str) -> bool:
+        """Write HTML to disk; return True on success, False on error."""
+        try:
+            file_path.write_text(html, encoding="utf-8")
+            return True
+        except Exception as e:
+            logger.error("Error writing HTML for '%s' to '%s': %s", file_path.stem, file_path, e)
+            return False
+
+    def _extract_articles_from_soup(self, soup: BeautifulSoup) -> Set[str]:
+        """Extract article titles from a category page soup."""
+        articles: Set[str] = set()
+        for group in soup.select("#mw-pages .mw-category-group"):
+            for link in group.select("a[href^='/wiki/']"):
+                title = unquote(link["href"]).replace("/wiki/", "")
+                if ":" not in title:
+                    articles.add(title.replace("_", " "))
+        return articles
+
+    def _find_article_files(self, paths: Optional[List[str]] = None) -> List[Path]:
+        """Resolve article files to scan either from provided paths or likely candidate dirs."""
+        if paths:
+            return [Path(p) for p in paths]
+
+        env_dir = os.getenv("ARTICLES_DIR")
+        candidates = []
+        if env_dir:
+            candidates.append(Path(env_dir))
+        candidates.append(Path("articles"))
+        candidates.append(Path(__file__).resolve().parent / "data" / "articles")
+
+        files: List[Path] = []
+        for c in candidates:
+            if c.exists() and c.is_dir():
+                files = sorted(c.glob("*.html"))
+                if files:
+                    break
+        return files
+
+    def _assess_article(self, fp: Path) -> Optional[Dict]:
+        """Read and assess a single article file; return entry dict or None if unreadable."""
+        try:
+            html = fp.read_text(encoding="utf-8")
+        except Exception:
+            return None
+
+        soup = BeautifulSoup(html, "html.parser")
+        title_tag = soup.find("title")
+        title = title_tag.get_text().replace(" - Wikipedia", "").strip() if title_tag else fp.stem
+
+        reasons: List[str] = []
+
+        # Length check: use visible text inside content area
+        content_el = soup.select_one("#mw-content-text")
+        visible_text = (" ".join(content_el.get_text().split()) if content_el else " ".join(soup.get_text().split()))
+        if len(visible_text) <= 2000:
+            reasons.append(f"too_short (length={len(visible_text)})")
+
+        # Citations count
+        citations = self._count_citations(soup)
+        if citations < 3:
+            reasons.append(f"few_citations (count={citations})")
+
+        # Problem or update box
+        if self._has_problem_or_update_box(soup):
+            reasons.append("has_problem_or_update_box")
+
+        # English availability
+        if not self._is_english_article(soup):
+            reasons.append("not_english")
+
+        passes = len(reasons) == 0
+        entry = {"title": title, "path": str(fp), "passes": passes, "reasons": reasons}
+        return entry
 
 
     # -----------------------------------------------------------------
@@ -216,76 +284,6 @@ class WikipediaClient:
 
         return False
 
-    def filter_downloaded_articles(self, paths: Optional[List[str]] = None) -> List[Dict]:
-        """Scan downloaded HTML files and return entries with pass/fail and reasons.
-
-        Behavior changes / enhancements:
-        - Looks for articles in multiple likely locations: ARTICLES_DIR env, './articles', and 'data/articles' next to this module.
-        - Returns a list of all scanned article entries (each with title/path/passes/reasons) so callers can inspect failures.
-        """
-        # Resolve articles directory candidates
-        env_dir = os.getenv("ARTICLES_DIR")
-        candidates = []
-        if env_dir:
-            candidates.append(Path(env_dir))
-        candidates.append(Path("articles"))
-        # folder next to this module: data/articles
-        candidates.append(Path(__file__).resolve().parent / "data" / "articles")
-
-        files: List[Path] = []
-        if paths:
-            files = [Path(p) for p in paths]
-        else:
-            for c in candidates:
-                if c.exists() and c.is_dir():
-                    files = sorted(c.glob('*.html'))
-                    if files:
-                        break
-
-        if not files:
-            print("No article HTML files found in ARTICLES_DIR, ./articles, or data/articles; searched:")
-            for c in candidates:
-                print(f" - {c}")
-            return []
-
-        results: List[Dict] = []
-
-        for fp in files:
-            try:
-                html = fp.read_text(encoding='utf-8')
-            except Exception:
-                # Skip unreadable files
-                continue
-            soup = BeautifulSoup(html, 'html.parser')
-            title_tag = soup.find('title')
-            title = title_tag.get_text().replace(' - Wikipedia', '').strip() if title_tag else fp.stem
-
-            reasons: List[str] = []
-
-            # Length check: use visible text inside content area
-            content_el = soup.select_one('#mw-content-text')
-            visible_text = (' '.join(content_el.get_text().split()) if content_el else ' '.join(soup.get_text().split()))
-            if len(visible_text) <= 2000:
-                reasons.append(f"too_short (length={len(visible_text)})")
-
-            # Citations count
-            citations = self._count_citations(soup)
-            if citations < 3:
-                reasons.append(f"few_citations (count={citations})")
-
-            # Problem or update box
-            if self._has_problem_or_update_box(soup):
-                reasons.append("has_problem_or_update_box")
-
-            # English availability
-            if not self._is_english_article(soup):
-                reasons.append("not_english")
-
-            passes = len(reasons) == 0
-            entry = {"title": title, "path": str(fp), "passes": passes, "reasons": reasons}
-            results.append(entry)
-        return results
-
 
 if __name__ == "__main__":
     import argparse
@@ -302,18 +300,18 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    client = WikipediaClient()
+    client = WikipediaScraper()
 
     # Optional downloading from categories
     if args.download and args.categories:
         categories = [c.strip() for c in args.categories.split(",") if c.strip()]
         if categories:
             articles = client.get_all_articles_from_categories(categories)
-            print(f"Found {len(articles)} articles in categories {categories}")
+            logger.info("Found %d articles in categories %s", len(articles), categories)
             downloaded_pages = client.fetch_pages_by_titles(list(articles))
-            print(f"Downloaded {len(downloaded_pages)} pages.")
+            logger.info("Downloaded %d pages.", len(downloaded_pages))
         else:
-            print("No valid categories provided to --categories.")
+            logger.warning("No valid categories provided to --categories.")
 
     # Optional filtering of saved HTML files
     if args.do_filter:
@@ -321,16 +319,16 @@ if __name__ == "__main__":
         results = client.filter_downloaded_articles(paths)
         passed = [r for r in results if r.get('passes')]
         failed = [r for r in results if not r.get('passes')]
-        print(f"Articles scanned: {len(results)}; passed: {len(passed)}; failed: {len(failed)}")
+        logger.info("Articles scanned: %d; passed: %d; failed: %d", len(results), len(passed), len(failed))
         if passed:
-            print("Passed articles:")
+            logger.info("Passed articles:")
             for p in passed:
-                print(f"- {p['title']} ({p['path']})")
+                logger.info("- %s (%s)", p['title'], p['path'])
         if failed:
-            print("\nFailed articles (showing up to 10 with reasons):")
+            logger.info("\nFailed articles (showing up to 10 with reasons):")
             for p in failed[:10]:
-                print(f"- {p['title']} ({p['path']}) -> reasons: {p['reasons']}")
+                logger.info("- %s (%s) -> reasons: %s", p['title'], p['path'], p['reasons'])
 
     if not (args.download or args.do_filter):
-        print("Both download and filter are disabled. Nothing to do.")
+        logger.warning("Both download and filter are disabled. Nothing to do.")
         parser.print_help()
