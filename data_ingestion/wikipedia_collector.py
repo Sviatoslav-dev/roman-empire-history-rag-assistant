@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -172,6 +173,8 @@ class WikipediaCollector:
                 else:
                     filename = f"{filename}.jpg"
 
+            filename = self._safe_filename(filename)
+
             filepath = IMAGES_DIR / filename
 
             # Skip if already exists
@@ -253,10 +256,13 @@ class WikipediaCollector:
         path = urlparse(image_url).path
         return unquote(os.path.basename(path))
 
-    def _safe_filename(self, title: str) -> str:
+    def _safe_filename(self, title: str, max_length: int = 50) -> str:
         """Return a filesystem-safe filename (without extension) for a title."""
         safe_name = unquote(title).replace(" ", "_")
         safe_name = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in safe_name)
+        if len(safe_name) > max_length:
+            h = hashlib.md5(safe_name.encode("utf-8")).hexdigest()[:8]
+            safe_name = f"{safe_name[:max_length]}_{h}"
         return safe_name
 
 
