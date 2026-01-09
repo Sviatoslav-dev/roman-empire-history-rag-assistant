@@ -128,7 +128,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    client = WikipediaCollector()
+    collector = WikipediaCollector()
 
     # Optional downloading from categories
     if args.download and args.categories_file:
@@ -136,17 +136,17 @@ if __name__ == "__main__":
             categories = [line.strip() for line in f if line.strip()]
 
         if categories:
-            articles = client.get_all_articles_from_categories(categories)
+            articles = collector.get_all_articles_from_categories(categories)
             logger.info("Found %d articles in categories %s", len(articles), categories)
-            downloaded_pages = client.fetch_pages_by_titles(list(articles))
+            downloaded_pages = collector.fetch_pages_by_titles(list(articles))
             logger.info("Downloaded %d pages.", len(downloaded_pages))
         else:
             logger.warning("No valid categories provided to --categories.")
 
     # Optional filtering of saved HTML files
     if args.do_filter:
-        downloaded_articles = client.get_downloaded_articles()
-        passed = client.filter_articles(downloaded_articles)
+        downloaded_articles = collector.get_downloaded_articles()
+        passed = collector.filter_articles(downloaded_articles)
         failed = [r for r in downloaded_articles if r not in passed]
         logger.info("Articles scanned: %d; passed: %d; failed: %d", len(downloaded_articles), len(passed), len(failed))
         if passed:
