@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -52,36 +53,24 @@ class WikipediaCollector:
         return articles
 
 
-    def fetch_page(self, title: str) -> Optional[Dict]:
-        """
-        Download the raw HTML for a Wikipedia article and save it to
-        the folder specified by the environment variable `ARTICLES_DIR`.
-        """
-        ARTICLES_DIR.mkdir(parents=True, exist_ok=True)
-
-        safe_name = self._safe_filename(title)
-        file_path = ARTICLES_DIR / f"{safe_name}.html"
-
-        if file_path.exists():
-            return {"title": title, "path": str(file_path), "downloaded": False}
-
-        page_html = self.wikipedia_client.fetch_article(title)
-
-        file_path.write_text(page_html, encoding="utf-8")
-
-        return {"title": title, "path": str(file_path), "downloaded": True}
-
-
-    def fetch_pages_by_titles(self, titles: List[str]) -> List[Dict]:
+    def fetch_pages_by_titles(self, titles: List[str]):
         """Download multiple Wikipedia articles as HTML files into `ARTICLES_DIR`."""
-
-        results: List[Dict] = []
         for title in tqdm(titles, desc="Downloading Wikipedia articles"):
-            res = self.fetch_page(title)
-            if res:
-                results.append(res)
+            ARTICLES_DIR.mkdir(parents=True, exist_ok=True)
+
+            safe_name = self._safe_filename(title)
+            file_path = ARTICLES_DIR / f"{safe_name}.html"
+
+            if file_path.exists():
+                logger.info(f"{file_path} already exists, skipping download.")
+                continue
+
+            page_html = self.wikipedia_client.fetch_article(title)
+
+            file_path.write_text(page_html, encoding="utf-8")
+
             time.sleep(0.5)  # polite rate limiting
-        return results
+
 
     def get_downloaded_articles(self) -> List[WikipediaArticleScraper]:
         """
@@ -183,34 +172,64 @@ class WikipediaCollector:
             filename = self._extract_image_filename(image_url)
             metadata = self.wikipedia_client.get_image_license(filename)
 
-            print(f"{metadata=}")
+            # print(f"{metadata=}")
 
             if metadata and self.should_skip_image(metadata):
                 print("Skip image: fair use")
                 continue
 
-            self.wikipedia_client.download_image(image_url, filepath)
-            time.sleep(0.5)
+            # self.wikipedia_client.download_image(image_url, filepath)
+            # time.sleep(0.5)
+
+    def normalize(self, text: str) -> str:
+        """
+        Normalize license text:
+        - lowercase
+        - replace separators with spaces
+        - collapse multiple spaces
+        """
+        text = text.lower()
+        text = re.sub(r"[-_/]", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
 
     def should_skip_image(self, extmetadata: dict) -> bool:
-        license_name = extmetadata.get("LicenseShortName", {}).get("value", "").lower()
-        usage_terms = extmetadata.get("UsageTerms", {}).get("value", "").lower()
+        license_name = extmetadata.get("LicenseShortName", {}).get("value", "")
+        usage_terms = extmetadata.get("UsageTerms", {}).get("value", "")
 
-        forbidden_keywords = [
-            "fair use",
-            "non-free",
+        combined_raw = f"{license_name} {usage_terms}"
+        combined = self.normalize(combined_raw)
+
+        print(f"{combined=}")
+
+        forbidden_triggers = [
+            # fair use / non-free
+            "fair",
+            "non free",
+            "nonfree",
+
+            # copyright
             "copyright",
-            "cc-by-nc",
-            "cc by-nc",
+            "all rights reserved",
+
+            # Creative Commons restrictions
+            "nc",  # non-commercial
             "noncommercial",
-            "cc-by-nd",
+            "nd",  # no-derivatives
             "no derivatives",
-            "nd"
         ]
 
-        combined = f"{license_name} {usage_terms}"
+        tokens = combined.split()
 
-        return any(keyword in combined for keyword in forbidden_keywords)
+        for trigger in forbidden_triggers:
+            if " " in trigger:
+                if trigger in combined:
+                    return True
+            else:
+                if trigger in tokens:
+                    return True
+
+        return False
 
     def _convert_thumbnail_to_fullsize(self, image_url: str) -> str:
         parts = image_url.split("/thumb/")
@@ -289,8 +308,7 @@ if __name__ == "__main__":
         if categories:
             articles = client.get_all_articles_from_categories(categories)
             logger.info("Found %d articles in categories %s", len(articles), categories)
-            downloaded_pages = client.fetch_pages_by_titles(list(articles))
-            logger.info("Downloaded %d pages.", len(downloaded_pages))
+            client.fetch_pages_by_titles(list(articles))
         else:
             logger.warning("No valid categories provided to --categories.")
 
@@ -310,10 +328,11 @@ if __name__ == "__main__":
             for p in failed[:10]:
                 logger.info("- %s", p.title)
 
+        chunks = client.split_articles_into_chunks(passed)
+        logger.info("Total article chunks created: %d", len(chunks))
+        # client.download_images([image for chunk in chunks for image in chunk["images"]])
+
     if not (args.download or args.do_filter):
         logger.warning("Both download and filter are disabled. Nothing to do.")
         parser.print_help()
 
-    chunks = client.split_articles_into_chunks(client.get_downloaded_articles())
-    logger.info("Total article chunks created: %d", len(chunks))
-    client.download_images([image for chunk in chunks for image in chunk["images"]])
