@@ -1,5 +1,6 @@
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Set
+from urllib.parse import unquote
 
 from data_ingestion.scraper.base_page_scraper import BasePageScraper
 from data_ingestion.wikipedia_api_client import WikipediaApiClient
@@ -150,3 +151,223 @@ class WikipediaArticleScraper(BasePageScraper):
             return True
 
         return False
+
+    def split_by_sections(self) -> List[Dict]:
+        """
+        Parse article HTML into a flat list of sections (split on h2–h6) and
+        collect all outgoing links.
+
+        Each heading defines a section; content until the next heading of the
+        same or higher level is part of that section. This effectively splits
+        the article by the lowest section level in the HTML.
+        """
+        # Remove table of contents
+        toc = self.soup.find("div", id="toc")
+        if toc:
+            toc.decompose()
+
+        for tag in self.soup.find_all(attrs={"role": ["navigation", "presentation"]}):
+            tag.decompose()
+
+        for tag in self.soup.find_all(class_="side-box"):
+            tag.decompose()
+
+        content_root = self.soup.find("div", id="mw-content-text")
+        if content_root is None:
+            # Try alternative selectors
+            content_root = self.soup.find("div", class_="mw-parser-output")
+            if content_root is None:
+                print("Warning: Could not find content root in HTML")
+                return [], set()
+
+        sections: List[Dict] = []
+
+        heading_stack: List[tuple[int, str]] = []
+        current_section: Optional[Dict] = {
+            "title": "Introduction",
+            "title_path": "Introduction",
+            "level": 1,
+            "text_parts": [],
+            "images": [],
+            "links": [],
+        }
+
+        # Iterate over all elements in the content area
+        # Use direct children first, then descendants for nested content
+        for el in content_root.find_all(["h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "table", "div", "figure"]):
+            if not getattr(el, "name", None):
+                continue
+
+            # New section starts at h2–h6
+            if el.name in {"h2", "h3", "h4", "h5", "h6"}:
+                level = int(el.name[1])
+                title_text = el.get_text(" ", strip=True)
+                if not title_text:
+                    continue
+
+                # Update heading stack to maintain hierarchy
+                while heading_stack and heading_stack[-1][0] >= level:
+                    heading_stack.pop()
+                heading_stack.append((level, title_text))
+                title_path = " > ".join(t for _, t in heading_stack)
+
+                # Save previous section if it exists
+                if current_section is not None:
+                    # Finalize previous section
+                    text_parts = current_section.pop("text_parts", [])
+                    current_section["text"] = "\n\n".join(text_parts).strip()
+                    if current_section["text"]:  # Only add non-empty sections
+                        sections.append(current_section)
+
+                current_section = {
+                    "title": title_text,
+                    "title_path": title_path,
+                    "level": level,
+                    "text_parts": [],
+                    "images": [],
+                    "links": [],
+                }
+                continue
+
+            # Accumulate content into the current section
+            if current_section is None:
+                # Skip content before the first heading
+                continue
+
+            # Special handling for infobox tables
+            if el.name == "table":
+                classes = el.get("class", [])
+                class_str = " ".join(classes) if classes else ""
+                if "infobox" in class_str.lower():
+                    # Extract structured infobox data
+                    infobox_text = self._extract_infobox_data(el, current_section)
+                    if infobox_text:
+                        current_section["text_parts"].append(infobox_text)
+                    continue
+
+            # Text content
+            if el.name in {"p", "ul", "ol", "table"}:
+                text = el.get_text(" ", strip=True)
+                if text:
+                    current_section["text_parts"].append(text)
+
+            # Images in this element
+            for img in el.select(":scope > a > img, :scope > span > a > img"):
+                # Try multiple attributes for image source
+
+                src = img.get("src") or img.get("data-src") or img.get("data-file-width") or img.get("href")
+                if not src:
+                    continue
+
+                # Skip data URIs and very small images (likely icons)
+                if src.startswith("data:") or "icon" in src.lower():
+                    continue
+
+                # Normalize protocol-relative URLs
+                if src.startswith("//"):
+                    src = "https:" + src
+                elif src.startswith("/"):
+                    src = "https://en.wikipedia.org" + src
+                elif not src.startswith("http"):
+                    src = "https://en.wikipedia.org" + src
+
+                current_section["images"].append(src)
+
+            # Links in this element
+            for a in el.find_all("a", recursive=True):
+                href = a.get("href") or ""
+                # Only keep standard article links: /wiki/Title
+                if not href.startswith("/wiki/"):
+                    continue
+                # Skip non-article namespaces like File:, Category:, etc.
+                link_part = href.split("/wiki/")[1]
+                if ":" in link_part:
+                    continue
+                title = unquote(link_part).replace("_", " ")
+                current_section["links"].append(title)
+
+        # Finalize last section
+        if current_section is not None:
+            text_parts = current_section.pop("text_parts", [])
+            current_section["text"] = "\n\n".join(text_parts).strip()
+            if current_section["text"]:
+                sections.append(current_section)
+
+        # Filter out empty sections
+        sections = [s for s in sections if s.get("text")]
+
+        return sections
+
+    def _extract_infobox_data(self, table, section: Dict) -> str:
+        """
+        Extract structured data from a Wikipedia infobox table.
+
+        Returns formatted text with key-value pairs like:
+        "Capital: Rome\nLanguages: Latin, Greek\n..."
+        """
+        infobox_items = []
+
+        # Find all rows in the infobox
+        rows = table.find_all("tr")
+
+        for row in rows:
+            # Skip header rows (usually the title row)
+            header = row.find("th", class_=lambda x: x and "infobox-label" in " ".join(x).lower())
+            if not header:
+                # Try alternative: look for th elements
+                header = row.find("th")
+
+            if header:
+                # This is a key-value row
+                key = header.get_text(" ", strip=True)
+
+                # Get the value (usually in td)
+                value_cell = row.find("td")
+                if value_cell:
+                    # Extract text, handling links and lists
+                    value_parts = []
+
+                    # Handle links in the value
+                    for link in value_cell.find_all("a"):
+                        href = link.get("href", "")
+                        link_text = link.get_text(" ", strip=True)
+                        if href.startswith("/wiki/"):
+                            link_part = href.split("/wiki/")[1]
+                            if ":" not in link_part:
+                                title = unquote(link_part).replace("_", " ")
+                                section["links"].append(title)
+                        value_parts.append(link_text)
+
+                    # If no links found, get all text
+                    if not value_parts:
+                        value_text = value_cell.get_text(" ", strip=True)
+                    else:
+                        # Combine link texts, removing duplicates while preserving order
+                        seen = set()
+                        unique_parts = []
+                        for part in value_cell.stripped_strings:
+                            if part not in seen:
+                                seen.add(part)
+                                unique_parts.append(part)
+                        value_text = ", ".join(unique_parts)
+
+                    if value_text:
+                        infobox_items.append(f"{key}: {value_text}")
+
+            # Extract images from infobox
+            for img in row.find_all("img"):
+                src = img.get("src") or img.get("data-src")
+                if src:
+                    # Normalize protocol-relative URLs
+                    if src.startswith("//"):
+                        src = "https:" + src
+                    elif src.startswith("/"):
+                        src = "https://en.wikipedia.org" + src
+                    elif not src.startswith("http"):
+                        src = "https://en.wikipedia.org" + src
+                    section["images"].append(src)
+
+        # Format as readable text
+        if infobox_items:
+            return "\n".join(infobox_items)
+        return ""

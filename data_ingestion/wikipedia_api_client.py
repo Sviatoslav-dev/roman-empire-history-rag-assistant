@@ -1,3 +1,6 @@
+import time
+from pathlib import Path
+
 import requests
 
 import wikipedia
@@ -66,3 +69,51 @@ class WikipediaApiClient:
         response = requests.get(url, headers=self.headers)
         response.raise_for_status()
         return response.text
+
+    def get_image_license(self, filename: str) -> dict | None:
+        params = {
+            "action": "query",
+            "format": "json",
+            "titles": f"File:{filename}",
+            "prop": "imageinfo",
+            "iiprop": "extmetadata"
+        }
+
+        r = requests.get(self.BASE_API_URL, params=params, headers=self.headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+
+        pages = data.get("query", {}).get("pages", {})
+        page = next(iter(pages.values()), None)
+
+        if not page or "imageinfo" not in page:
+            return None
+
+        return page["imageinfo"][0]["extmetadata"]
+
+    def download_image(self, image_url: str, filepath: Path) -> str | requests.Response:
+        response = requests.get(image_url, headers=self.headers, timeout=30)
+
+        if response.status_code == 429:
+            time.sleep(60)
+            response = requests.get(image_url, headers=self.headers, timeout=30)
+            response.raise_for_status()
+
+        if response.status_code == 200:
+            # Check content type
+            content_type = response.headers.get("content-type", "").lower()
+            content_length = response.headers.get("content-length", "0")
+            # Accept if it's an image or has content
+            if "image" in content_type or (content_length and int(content_length) > 0):
+                # Write the image using streaming
+                with open(filepath, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                return str(filepath)
+            else:
+                print(
+                    f"Warning: URL {image_url} returned non-image content: {content_type}, length: {content_length}")
+        return response
+
+
