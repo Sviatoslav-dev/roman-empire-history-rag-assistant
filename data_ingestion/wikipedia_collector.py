@@ -51,36 +51,24 @@ class WikipediaCollector:
         return articles
 
 
-    def fetch_page(self, title: str) -> Optional[Dict]:
-        """
-        Download the raw HTML for a Wikipedia article and save it to
-        the folder specified by the environment variable `ARTICLES_DIR`.
-        """
-        ARTICLES_DIR.mkdir(parents=True, exist_ok=True)
-
-        safe_name = self._safe_filename(title)
-        file_path = ARTICLES_DIR / f"{safe_name}.html"
-
-        if file_path.exists():
-            return {"title": title, "path": str(file_path), "downloaded": False}
-
-        page_html = self.wikipedia_client.fetch_article(title)
-
-        file_path.write_text(page_html, encoding="utf-8")
-
-        return {"title": title, "path": str(file_path), "downloaded": True}
-
-
-    def fetch_pages_by_titles(self, titles: List[str]) -> List[Dict]:
+    def fetch_pages_by_titles(self, titles: List[str]):
         """Download multiple Wikipedia articles as HTML files into `ARTICLES_DIR`."""
 
-        results: List[Dict] = []
+        ARTICLES_DIR.mkdir(parents=True, exist_ok=True)
+
         for title in tqdm(titles, desc="Downloading Wikipedia articles"):
-            res = self.fetch_page(title)
-            if res:
-                results.append(res)
+            safe_name = self._safe_filename(title)
+            file_path = ARTICLES_DIR / f"{safe_name}.html"
+
+            if file_path.exists():
+                logger.info(f"Skipping {title} as it already exists.")
+                continue
+
+            page_html = self.wikipedia_client.fetch_article(title)
+
+            file_path.write_text(page_html, encoding="utf-8")
+
             time.sleep(0.5)  # polite rate limiting
-        return results
 
     def get_downloaded_articles(self) -> List[WikipediaArticleScraper]:
         """
@@ -138,8 +126,7 @@ if __name__ == "__main__":
         if categories:
             articles = collector.get_all_articles_from_categories(categories)
             logger.info("Found %d articles in categories %s", len(articles), categories)
-            downloaded_pages = collector.fetch_pages_by_titles(list(articles))
-            logger.info("Downloaded %d pages.", len(downloaded_pages))
+            collector.fetch_pages_by_titles(list(articles))
         else:
             logger.warning("No valid categories provided to --categories.")
 
