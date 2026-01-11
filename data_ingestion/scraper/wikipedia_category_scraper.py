@@ -7,15 +7,6 @@ from urllib.parse import unquote
 
 class WikipediaCategoryScraper(BasePageScraper):
 
-    @classmethod
-    def get_by_title(cls, title: str) -> Optional['WikipediaCategoryScraper']:
-        """Fetch category by title and return scraper instance."""
-        client = WikipediaApiClient()
-        html = client.fetch_category(title)
-        if html:
-            return cls(html, title)
-        return None
-
     def extract_articles_from_category(self) -> Set[str]:
         """Extract article titles from a category page."""
         articles: Set[str] = set()

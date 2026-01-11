@@ -10,34 +10,6 @@ logger = get_logger(__name__)
 
 class WikipediaArticleScraper(BasePageScraper):
 
-    @classmethod
-    def get_by_title(cls, title: str) -> Optional['WikipediaArticleScraper']:
-        """Fetch article by title and return scraper instance."""
-        client = WikipediaApiClient()
-        html = client.fetch_article(title)
-        if html:
-            return cls(html, title)
-        return None
-
-    @classmethod
-    def get_from_file(cls, article_path: Path) -> Optional["WikipediaArticleScraper"]:
-        """Create a WikipediaArticleScraper from a saved HTML file.
-
-        Expects a direct path to an HTML file.
-        The article title is inferred from the filename (without extension).
-        """
-        if not article_path.exists() or not article_path.is_file():
-            logger.error("HTML file does not exist: %s", article_path)
-            return None
-
-        try:
-            html = article_path.read_text(encoding="utf-8")
-            title = article_path.stem  # filename without extension
-            return cls(html, title)
-        except Exception as e:
-            logger.error("Error reading HTML file %s: %s", article_path, e)
-            return None
-
     def passes_quality_filters(self) -> bool:
         """
         Check whether the article meets basic quality requirements.
