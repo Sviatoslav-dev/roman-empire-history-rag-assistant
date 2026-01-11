@@ -11,10 +11,16 @@ logger = get_logger(__name__)
 ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
 
 class WikipediaStorage:
+    """Handles persistence of Wikipedia articles and related assets."""
+
     def get_downloaded_articles(self) -> List[WikipediaArticleScraper]:
         """
         Load saved Wikipedia article HTML files from `ARTICLES_DIR`
         and return scraper instances for them.
+
+        Returns:
+            A list of `WikipediaArticleScraper` instances constructed from saved
+            HTML files found in the `ARTICLES_DIR` directory.
         """
 
         articles: List[WikipediaArticleScraper] = []
@@ -39,11 +45,20 @@ class WikipediaStorage:
         return articles
 
     def article_exists(self, title: str) -> bool:
+        """Return True if an article file for the given title exists on disk."""
         safe_name = self.article_title_to_filename(title)
         file_path = ARTICLES_DIR / f"{safe_name}.html"
         return file_path.exists()
 
     def save_article_to_file(self, title: str, html: str) -> None:
+        """Persist article HTML to the articles directory using a safe filename.
+
+        Args:
+            title: Article title used to generate the filename.
+            html: Raw HTML content to write to disk.
+        """
+        ARTICLES_DIR.mkdir(parents=True, exist_ok=True)
+
         filename = self.article_title_to_filename(title)
         file_path = ARTICLES_DIR / f"{filename}.html"
 
