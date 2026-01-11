@@ -1,6 +1,9 @@
+import json
 from pathlib import Path
 from typing import Optional, List, Dict, Set
 from urllib.parse import unquote
+
+from bs4 import BeautifulSoup
 
 from data_ingestion.scraper.base_page_scraper import BasePageScraper
 from data_ingestion.wikipedia_api_client import WikipediaApiClient
@@ -189,7 +192,6 @@ class WikipediaArticleScraper(BasePageScraper):
             "level": 1,
             "text_parts": [],
             "images": [],
-            "links": [],
         }
 
         # Iterate over all elements in the content area
@@ -225,7 +227,6 @@ class WikipediaArticleScraper(BasePageScraper):
                     "level": level,
                     "text_parts": [],
                     "images": [],
-                    "links": [],
                 }
                 continue
 
@@ -235,15 +236,27 @@ class WikipediaArticleScraper(BasePageScraper):
                 continue
 
             # Special handling for infobox tables
+            # if el.name == "table":
+            #     classes = el.get("class", [])
+            #     class_str = " ".join(classes) if classes else ""
+            #     if "infobox" in class_str.lower():
+            #         # Extract structured infobox data
+            #         infobox_text = self._extract_infobox_data(el, current_section)
+            #         if infobox_text:
+            #             current_section["text_parts"].append(infobox_text)
+            #         continue
+
             if el.name == "table":
                 classes = el.get("class", [])
-                class_str = " ".join(classes) if classes else ""
-                if "infobox" in class_str.lower():
-                    # Extract structured infobox data
-                    infobox_text = self._extract_infobox_data(el, current_section)
-                    if infobox_text:
-                        current_section["text_parts"].append(infobox_text)
-                    continue
+                class_str = " ".join(classes).lower() if classes else ""
+
+                table_json = self._extract_table_generic_json(el, current_section)
+
+                if table_json:
+                    current_section["text_parts"].append(
+                        json.dumps(table_json, ensure_ascii=False)
+                    )
+                continue
 
             # Text content
             if el.name in {"p", "ul", "ol", "table"}:
@@ -284,7 +297,6 @@ class WikipediaArticleScraper(BasePageScraper):
                 if ":" in link_part:
                     continue
                 title = unquote(link_part).replace("_", " ")
-                current_section["links"].append(title)
 
         # Finalize last section
         if current_section is not None:
@@ -297,6 +309,92 @@ class WikipediaArticleScraper(BasePageScraper):
         sections = [s for s in sections if s.get("text")]
 
         return sections
+
+    def _extract_table_generic_json(self, table, current_section):
+        def clean_text(el):
+            return " ".join(el.stripped_strings)
+
+        rows = table.find_all("tr")
+        if not rows:
+            return None
+
+        caption = None
+        header_rows = []
+        data_rows = []
+
+        # --- 1. Витягуємо caption (рядок з colspan на всю таблицю)
+        first_row_cells = rows[0].find_all(["td", "th"])
+        if len(first_row_cells) == 1 and first_row_cells[0].has_attr("colspan"):
+            caption = clean_text(first_row_cells[0])
+            rows = rows[1:]
+
+        # --- 2. Збираємо header rows (поки є <th>)
+        while rows and rows[0].find_all("th"):
+            header_rows.append(rows.pop(0))
+
+        # --- 3. Побудова багаторівневих заголовків
+        header_matrix = []
+        max_cols = 0
+
+        for hr in header_rows:
+            row = []
+            for cell in hr.find_all("th"):
+                text = clean_text(cell)
+                colspan = int(cell.get("colspan", 1))
+                row.extend([text] * colspan)
+            max_cols = max(max_cols, len(row))
+            header_matrix.append(row)
+
+        # вирівнюємо всі рядки заголовків
+        for row in header_matrix:
+            if len(row) < max_cols:
+                row.extend([""] * (max_cols - len(row)))
+
+        # транспонуємо → отримуємо колонкові ієрархії
+        columns = []
+        for col_idx in range(max_cols):
+            hierarchy = []
+            for row in header_matrix:
+                if row[col_idx]:
+                    hierarchy.append(row[col_idx])
+            columns.append(hierarchy)
+
+        # --- 4. Парсинг data rows
+        structured_rows = []
+
+        for tr in rows:
+            cells = tr.find_all("td")
+            if len(cells) != max_cols:
+                continue
+
+            row_obj = {}
+            for col, cell in zip(columns, cells):
+                key = ".".join(col)
+                value = clean_text(cell)
+
+                # numeric normalization
+                value = value.replace(",", "")
+                try:
+                    if "." in value:
+                        value = float(value)
+                    else:
+                        value = int(value)
+                except ValueError:
+                    pass
+
+                row_obj[key] = value
+
+            structured_rows.append(row_obj)
+
+        return {
+            "table_context": {
+                "section": current_section.get("title"),
+                "caption": caption,
+                "description": "Structured table extracted from HTML with hierarchical headers",
+                "columns": columns,
+                "rows": structured_rows
+            }
+        }
 
     def _extract_infobox_data(self, table, section: Dict) -> str:
         """

@@ -80,13 +80,12 @@ class WikipediaCollector:
         """
 
         articles: List[WikipediaArticleScraper] = []
-        files: List[Path] = [ARTICLES_DIR]
 
-        for c in files:
-            if not c.exists() or not c.is_dir():
-                continue
-            for fp in sorted(c.glob("*.html")):
-                articles.append(WikipediaArticleScraper.get_from_file(fp))
+        if not ARTICLES_DIR.exists() or not ARTICLES_DIR.is_dir():
+            return articles
+
+        for fp in sorted(ARTICLES_DIR.glob("*.html")):
+            articles.append(WikipediaArticleScraper.get_from_file(fp))
         return articles
 
     def filter_articles(self, articles: List[WikipediaArticleScraper]) -> List[WikipediaArticleScraper]:
@@ -96,7 +95,17 @@ class WikipediaCollector:
     def split_articles_into_chunks(self, articles: List[WikipediaArticleScraper]) -> List[Dict]:
         chunks = []
         for article in articles:
-            chunks.extend(article.split_by_sections())
+            sections = article.split_by_sections()
+            for section in sections:
+                chunk = {
+                    "page_title": article.title,
+                    "page_url": article.url,
+                    "section_title": section.get("title"),
+                    "section_path": section.get("title_path"),
+                    "section_level": section.get("level"),
+                    "text": section.get("text"),
+                }
+                chunks.append(chunk)
         return chunks
 
     def download_images(self, urls: List[str]):
@@ -162,7 +171,7 @@ class WikipediaCollector:
                 else:
                     filename = f"{filename}.jpg"
 
-            filename = self._safe_filename(filename)
+            filename = self._safe_filename(filename, max_length=255)
 
             filepath = IMAGES_DIR / filename
 
@@ -275,13 +284,15 @@ class WikipediaCollector:
         path = urlparse(image_url).path
         return unquote(os.path.basename(path))
 
-    def _safe_filename(self, title: str, max_length: int = 50) -> str:
+    def _safe_filename(self, title: str, max_length: int | None = None) -> str:
         """Return a filesystem-safe filename (without extension) for a title."""
         safe_name = unquote(title).replace(" ", "_")
         safe_name = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in safe_name)
-        if len(safe_name) > max_length:
+        if max_length and len(safe_name) > max_length:
+            name, ext = os.path.splitext(safe_name)
             h = hashlib.md5(safe_name.encode("utf-8")).hexdigest()[:8]
-            safe_name = f"{safe_name[:max_length]}_{h}"
+            cut_len = max_length - len(ext) - len(h) - 1  # 1 for "_"
+            safe_name = f"{name[:cut_len]}_{h}{ext}"
         return safe_name
 
 

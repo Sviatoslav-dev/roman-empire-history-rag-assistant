@@ -4,6 +4,7 @@ from pathlib import Path
 import requests
 
 import wikipedia
+from bs4 import BeautifulSoup
 
 from logger import get_logger
 
@@ -43,15 +44,21 @@ class WikipediaApiClient:
             logger.error("Error fetching page '%s': %s", title, e)
             return None
 
-        try:
-            html = page.html()
-        except Exception as e:
-            logger.error("Error getting HTML for '%s': %s", title, e)
-            return None
+        # try:
+        #     html = page.html()
+        # except Exception as e:
+        #     logger.error("Error getting HTML for '%s': %s", title, e)
+        #     return None
+
+        response = requests.get(page.url, headers=self.headers)
+        response.raise_for_status()
+        html = response.text
+
 
         if not html:
             logger.warning("No HTML content for '%s'", title)
             return None
+
         return html
 
     def fetch_category(self, category_name):
