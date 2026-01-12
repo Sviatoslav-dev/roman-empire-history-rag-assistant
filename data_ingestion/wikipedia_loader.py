@@ -16,6 +16,7 @@ load_dotenv()
 logger = get_logger(__name__)
 
 _wikipedia_client = WikipediaApiClient()
+_storage = WikipediaStorage()
 
 ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
 
@@ -58,11 +59,9 @@ class WikipediaLoader:
             A list of downloaded page HTML contents (strings).
         """
 
-        storage = WikipediaStorage()
-
         pages: List[str] = []
         for title in tqdm(titles, desc="Downloading Wikipedia articles"):
-            if storage.article_exists(title):
+            if _storage.article_exists(title):
                 logger.info(f"Skipping {title} as it already exists.")
                 continue
 
@@ -72,7 +71,7 @@ class WikipediaLoader:
                 time.sleep(self.RATE_LIMIT_DELAY)
                 continue
 
-            storage.save_article_to_file(title, page_html)
+            _storage.save_article_to_file(title, page_html)
             pages.append(page_html)
 
             time.sleep(self.RATE_LIMIT_DELAY)  # polite rate limiting
