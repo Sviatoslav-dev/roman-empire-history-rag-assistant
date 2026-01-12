@@ -230,6 +230,22 @@ class WikipediaArticleScraper(BasePageScraper):
                 }
                 continue
 
+            if el.name == "figure":
+                # Finalize previous section
+                text_parts = current_section.pop("text_parts", [])
+                current_section["text"] = "\n\n".join(text_parts).strip()
+                if current_section["text"]:  # Only add non-empty sections
+                    sections.append(current_section)
+
+                current_section = {
+                    "title": current_section["title"],
+                    "title_path": current_section["title_path"],
+                    "level": current_section["level"],
+                    "text_parts": [],
+                    "images": [],
+                }
+
+
             # Accumulate content into the current section
             if current_section is None:
                 # Skip content before the first heading

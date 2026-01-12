@@ -122,5 +122,3 @@ class WikipediaApiClient:
                 print(
                     f"Warning: URL {image_url} returned non-image content: {content_type}, length: {content_length}")
         return response
-
-
