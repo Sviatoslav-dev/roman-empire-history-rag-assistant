@@ -1,28 +1,22 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import List
 
-from dotenv import load_dotenv
+from typing import List
 
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
 from data_ingestion.wikipedia_loader import WikipediaLoader
 from data_ingestion.wikipedia_storage import WikipediaStorage
 from logger import get_logger
 
-load_dotenv()
-
 logger = get_logger(__name__)
-
-ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
 
 
 class WikipediaCollector:
     """High-level orchestration of Wikipedia article collection workflow."""
 
     MIN_ARTICLE_LENGTH = 2000  # Minimum number of characters in the articles
-    MIN_ARTICLE_CITATIONS_NUMBER = 3 # Minimum number of citations in the articles
+    MIN_ARTICLE_CITATIONS = 3  # Minimum number of citations in the articles
 
     def __init__(self, wikipedia_loader: WikipediaLoader, wikipedia_storage: WikipediaStorage) -> None:
         self.loader = wikipedia_loader
@@ -44,7 +38,7 @@ class WikipediaCollector:
             try:
                 if article.passes_quality_filters(
                         self.MIN_ARTICLE_LENGTH,
-                        self.MIN_ARTICLE_CITATIONS_NUMBER,
+                        self.MIN_ARTICLE_CITATIONS,
                 ):
                     filtered.append(article)
             except Exception as e:

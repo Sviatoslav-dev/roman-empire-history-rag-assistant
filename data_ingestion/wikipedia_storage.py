@@ -1,14 +1,12 @@
-import os
-from pathlib import Path
 from typing import List
 from urllib.parse import unquote
 
+from config import ARTICLES_DIR
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
 from logger import get_logger
 
 logger = get_logger(__name__)
 
-ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
 
 class WikipediaStorage:
     """Handles persistence of Wikipedia articles and related assets."""
@@ -31,16 +29,20 @@ class WikipediaStorage:
 
         for fp in sorted(ARTICLES_DIR.glob("*.html")):
             if not fp.exists() or not fp.is_file():
-                logger.error("HTML file does not exist: %s", fp)
-                return []
+                logger.warning("Skipping non-file entry in articles dir: %s", fp)
+                continue
 
             try:
                 html = fp.read_text(encoding="utf-8")
                 title = fp.stem  # filename without extension
-                articles.append(WikipediaArticleScraper(html, title))
-            except Exception as e:
-                logger.error("Error reading HTML file %s: %s", fp, e)
-                return []
+                try:
+                    articles.append(WikipediaArticleScraper(html, title))
+                except Exception:
+                    logger.exception("Failed to construct scraper for file %s; skipping", fp)
+                    continue
+            except Exception:
+                logger.exception("Error reading HTML file %s; skipping", fp)
+                continue
 
         return articles
 

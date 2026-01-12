@@ -30,9 +30,6 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
     logger_name = name or "roman_empire"
     logger = logging.getLogger(logger_name)
 
-    if level_name not in valid_levels:
-        logger.warning(f"Invalid LOG_LEVEL '{level_name}', using INFO")
-
     # Configure handler only once per logger
     if not logger.handlers:
         handler = logging.StreamHandler()

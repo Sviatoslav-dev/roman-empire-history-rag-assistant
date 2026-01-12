@@ -1,9 +1,6 @@
-import os
 import time
-from pathlib import Path
 from typing import Set, List
 
-from dotenv import load_dotenv
 from tqdm import tqdm
 
 from data_ingestion.scraper.wikipedia_category_scraper import WikipediaCategoryScraper
@@ -11,14 +8,10 @@ from data_ingestion.wikipedia_api_client import WikipediaApiClient
 from data_ingestion.wikipedia_storage import WikipediaStorage
 from logger import get_logger
 
-load_dotenv()
-
 logger = get_logger(__name__)
 
 _wikipedia_client = WikipediaApiClient()
 _storage = WikipediaStorage()
-
-ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
 
 class WikipediaLoader:
     """Coordinates loading Wikipedia data from external sources."""
@@ -78,7 +71,7 @@ class WikipediaLoader:
         return pages
 
     def load_categories(self, categories_file: str) -> List[str]:
-        """Load categories names from a newline-delimited text file.
+        """Load category names from a newline-delimited text file.
 
         Args:
             categories_file: Path to a file containing category names, one per line.

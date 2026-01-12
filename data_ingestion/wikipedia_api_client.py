@@ -22,7 +22,7 @@ class WikipediaApiClient:
         """Initialize the Wikipedia API client and set default request headers."""
         wikipedia.set_lang("en")
 
-    def fetch_article(self, title) -> str | None:
+    def fetch_article(self, title) -> Optional[str]:
         """
         Fetch the raw HTML of a Wikipedia article by its title.
 
