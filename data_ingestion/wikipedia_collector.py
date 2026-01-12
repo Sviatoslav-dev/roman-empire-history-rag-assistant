@@ -7,12 +7,14 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 from urllib.parse import unquote, urlparse
+from typing import List
 
 from dotenv import load_dotenv
-from tqdm import tqdm
 
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
-from data_ingestion.scraper.wikipedia_category_scraper import WikipediaCategoryScraper
+from data_ingestion.wikipedia_loader import WikipediaLoader
+from data_ingestion.wikipedia_storage import WikipediaStorage
+
 from data_ingestion.wikipedia_api_client import WikipediaApiClient
 from logger import get_logger
 
@@ -24,73 +26,76 @@ ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
 IMAGES_DIR = Path(os.getenv("IMAGES_DIR", "./data/images"))
 
 
-
 class WikipediaCollector:
-    """
-    High-level orchestration layer for collecting Wikipedia articles.
+    """High-level orchestration of Wikipedia article collection workflow."""
 
-    Responsibilities:
-    - collect article titles from Wikipedia categories,
-    - download raw HTML pages for articles,
-    - load saved article HTML files,
-    - apply quality filters to downloaded articles.
-    """
+    MIN_ARTICLE_LENGTH = 2000  # Minimum number of characters in the articles
+    MIN_ARTICLE_CITATIONS_NUMBER = 3 # Minimum number of citations in the articles
 
-    def __init__(self) -> None:
-        """Initialize Wikipedia client."""
+    def __init__(self, wikipedia_loader: WikipediaLoader, wikipedia_storage: WikipediaStorage) -> None:
+        self.loader = wikipedia_loader
+        self.storage = wikipedia_storage
+
         self.wikipedia_client = WikipediaApiClient()
 
-    def get_all_articles_from_categories(self, categories: list[str]) -> Set[str]:
-        """Collect article titles from the given Wikipedia categories."""
-        articles = set()
-
-        for category in categories:
-            logger.info(f"Crawling category: {category}")
-
-            # extract articles via helper
-            scraper = WikipediaCategoryScraper.get_by_title(category)
-            articles.update(scraper.extract_articles_from_category())
-
-        return articles
-
-
-    def fetch_pages_by_titles(self, titles: List[str]):
-        """Download multiple Wikipedia articles as HTML files into `ARTICLES_DIR`."""
-        for title in tqdm(titles, desc="Downloading Wikipedia articles"):
-            ARTICLES_DIR.mkdir(parents=True, exist_ok=True)
-
-            safe_name = self._safe_filename(title)
-            file_path = ARTICLES_DIR / f"{safe_name}.html"
-
-            if file_path.exists():
-                logger.info(f"{file_path} already exists, skipping download.")
-                continue
-
-            page_html = self.wikipedia_client.fetch_article(title)
-
-            file_path.write_text(page_html, encoding="utf-8")
-
-            time.sleep(0.5)  # polite rate limiting
-
-
-    def get_downloaded_articles(self) -> List[WikipediaArticleScraper]:
-        """
-        Load saved Wikipedia article HTML files from `ARTICLES_DIR`
-        and return scraper instances for them.
-        """
-
-        articles: List[WikipediaArticleScraper] = []
-
-        if not ARTICLES_DIR.exists() or not ARTICLES_DIR.is_dir():
-            return articles
-
-        for fp in sorted(ARTICLES_DIR.glob("*.html")):
-            articles.append(WikipediaArticleScraper.get_from_file(fp))
-        return articles
 
     def filter_articles(self, articles: List[WikipediaArticleScraper]) -> List[WikipediaArticleScraper]:
-        """Filter article scrapers using quality criteria."""
-        return [article for article in articles if article.passes_quality_filters()]
+        """Filter article scrapers using quality criteria.
+
+        Args:
+            articles: List of WikipediaArticleScraper instances to evaluate.
+
+        Returns:
+            A list of scrapers that passed the quality filters.
+        """
+        filtered: List[WikipediaArticleScraper] = []
+
+        for article in articles:
+            try:
+                if article.passes_quality_filters(
+                        self.MIN_ARTICLE_LENGTH,
+                        self.MIN_ARTICLE_CITATIONS_NUMBER,
+                ):
+                    filtered.append(article)
+            except Exception as e:
+                logger.error("Filter error for %s: %s", article.title, e)
+        return filtered
+
+    def collect_articles(self, categories_file: str) -> List[WikipediaArticleScraper]:
+        """Load category names from a file, download articles, and filter them.
+
+        Args:
+            categories_file: Path to newline-delimited category file.
+
+        Returns:
+            A list of WikipediaArticleScraper instances that passed filters.
+        """
+        categories = self.loader.load_categories(categories_file)
+
+        article_titles = self.loader.get_all_articles_from_categories(categories)
+
+        if categories:
+            logger.info("Found %d articles in categories %s", len(article_titles), categories)
+        else:
+            logger.warning("No valid categories provided in %s.", categories_file)
+
+        if not article_titles:
+            logger.warning("No article titles discovered from categories; aborting fetch.")
+            return []
+
+        self.loader.fetch_pages_by_titles(article_titles)
+
+        downloaded_articles = self.storage.get_downloaded_articles()
+        filtered_articles = self.filter_articles(downloaded_articles)
+
+        failed = [r for r in downloaded_articles if r not in filtered_articles]
+        logger.info("Articles scanned: %d; passed: %d; failed: %d", len(downloaded_articles), len(filtered_articles), len(failed))
+        return filtered_articles
+
+        # chunks = client.split_articles_into_chunks(passed)
+        # logger.info("Total article chunks created: %d", len(chunks))
+        # client.download_images([image for chunk in chunks for image in chunk["images"]])
+
 
     def split_articles_into_chunks(self, articles: List[WikipediaArticleScraper]) -> List[Dict]:
         chunks = []
@@ -306,50 +311,16 @@ if __name__ == "__main__":
         default=os.getenv("CATEGORIES_FILE", "categories.txt"),
         help="Path to a text file with Wikipedia categories (one per line)"
     )
-    # Download is enabled by default; provide a --no-download to turn it off
-    parser.add_argument("--download", dest="download", action="store_true", default=True, help="Enable downloading (default: enabled).")
-    parser.add_argument("--no-download", dest="download", action="store_false", help="Disable downloading.")
-    # Filtering is enabled by default; provide a --no-filter to turn it off
-    parser.add_argument("--filter", dest="do_filter", action="store_true", default=True, help="Enable filtering of saved HTML files (default: enabled).")
-    parser.add_argument("--no-filter", dest="do_filter", action="store_false", help="Disable filtering.")
+
 
     args = parser.parse_args()
 
-    client = WikipediaCollector()
+    loader = WikipediaLoader()
+    storage = WikipediaStorage()
+    collector = WikipediaCollector(loader, storage)
+    articles = collector.collect_articles(args.categories_file)
 
-    # Optional downloading from categories
-    if args.download and args.categories_file:
-        with open(args.categories_file, encoding="utf-8") as f:
-            categories = [line.strip() for line in f if line.strip()]
-
-        if categories:
-            articles = client.get_all_articles_from_categories(categories)
-            logger.info("Found %d articles in categories %s", len(articles), categories)
-            client.fetch_pages_by_titles(list(articles))
-        else:
-            logger.warning("No valid categories provided to --categories.")
-
-    # Optional filtering of saved HTML files
-    if args.do_filter:
-        downloaded_articles = client.get_downloaded_articles()
-        passed = client.filter_articles(downloaded_articles)
-        failed = [r for r in downloaded_articles if r not in passed]
-        logger.info("Articles scanned: %d; passed: %d; failed: %d", len(downloaded_articles), len(passed), len(failed))
-        if passed:
-            logger.info("Passed articles:")
-            for p in passed:
-                logger.info("- %s", p.title)
-
-        if failed:
-            logger.info("\nFailed articles (showing up to 10 with reasons):")
-            for p in failed[:10]:
-                logger.info("- %s", p.title)
-
-        chunks = client.split_articles_into_chunks(passed)
-        logger.info("Total article chunks created: %d", len(chunks))
-        # client.download_images([image for chunk in chunks for image in chunk["images"]])
-
-    if not (args.download or args.do_filter):
-        logger.warning("Both download and filter are disabled. Nothing to do.")
-        parser.print_help()
-
+    if articles:
+        logger.info("Articles that passed the filters:")
+        for p in articles:
+            logger.info("- %s", p.title)

@@ -19,11 +19,19 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
     - Sets propagate=False to avoid duplicate messages when root logger
       is configured elsewhere.
     """
+    valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+
+    if level_name not in valid_levels:
+        level_name = "INFO"
+
     level = getattr(logging, level_name, logging.INFO)
 
     logger_name = name or "roman_empire"
     logger = logging.getLogger(logger_name)
+
+    if level_name not in valid_levels:
+        logger.warning(f"Invalid LOG_LEVEL '{level_name}', using INFO")
 
     # Configure handler only once per logger
     if not logger.handlers:
