@@ -95,7 +95,7 @@ class WikipediaApiClient:
             "iiprop": "extmetadata"
         }
 
-        r = requests.get(self.BASE_API_URL, params=params, headers=self.headers, timeout=30)
+        r = requests.get(self.BASE_API_URL, params=params, headers=self.HEADERS, timeout=30)
         r.raise_for_status()
         data = r.json()
 
@@ -108,11 +108,12 @@ class WikipediaApiClient:
         return page["imageinfo"][0]["extmetadata"]
 
     def download_image(self, image_url: str, filepath: Path) -> str | requests.Response:
-        response = requests.get(image_url, headers=self.headers, timeout=30)
+        response = requests.get(image_url, headers=self.HEADERS, timeout=30)
 
         if response.status_code == 429:
-            time.sleep(60)
-            response = requests.get(image_url, headers=self.headers, timeout=30)
+            retry_after = response.headers.get("Retry-After")
+            time.sleep(int(retry_after))
+            response = requests.get(image_url, headers=self.HEADERS, timeout=30)
             response.raise_for_status()
 
         if response.status_code == 200:
@@ -122,6 +123,7 @@ class WikipediaApiClient:
             # Accept if it's an image or has content
             if "image" in content_type or (content_length and int(content_length) > 0):
                 # Write the image using streaming
+                filepath.parent.mkdir(parents=True, exist_ok=True)
                 with open(filepath, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:

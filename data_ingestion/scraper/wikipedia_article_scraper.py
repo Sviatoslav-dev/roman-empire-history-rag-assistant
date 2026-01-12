@@ -1,10 +1,8 @@
-import json
-from pathlib import Path
-from typing import Optional, List, Dict, Set
-from urllib.parse import unquote
-
-from bs4 import BeautifulSoup
 from __future__ import annotations
+
+import json
+from typing import Optional, List, Dict
+from urllib.parse import unquote
 
 from data_ingestion.scraper.base_page_scraper import BasePageScraper
 from logger import get_logger
