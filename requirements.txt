@@ -1,3 +1,4 @@
+qdrant-client==1.16.2
 backend==0.2.4.1
 beautifulsoup4==4.14.3
 blinker==1.9.0

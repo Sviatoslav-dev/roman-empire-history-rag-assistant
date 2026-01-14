@@ -132,6 +132,10 @@ class WikipediaArticleScraper(BasePageScraper):
         content_el = self.soup.select_one("#mw-content-text")
         return " ".join(content_el.get_text().split()) if content_el else " ".join(self.soup.get_text().split())
 
+    def texts_chars_count(self, texts: List[str]) -> int:
+        texts_len = [len(text) for text in texts]
+        return sum(texts_len)
+
     def split_by_sections(self) -> List[Dict]:
         """
         Parse article HTML into a flat list of sections (split on h2–h6) and
@@ -196,7 +200,8 @@ class WikipediaArticleScraper(BasePageScraper):
                     text_parts = current_section.pop("text_parts", [])
                     current_section["text"] = "\n\n".join(text_parts).strip()
                     if current_section["text"]:  # Only add non-empty sections
-                        sections.append(current_section)
+                        if current_section["title"] not in ("References", "Notes", "See also", "External links"):
+                            sections.append(current_section)
 
                 current_section = {
                     "title": title_text,
@@ -229,33 +234,55 @@ class WikipediaArticleScraper(BasePageScraper):
                 continue
 
             # Special handling for infobox tables
-            # if el.name == "table":
-            #     classes = el.get("class", [])
-            #     class_str = " ".join(classes) if classes else ""
-            #     if "infobox" in class_str.lower():
-            #         # Extract structured infobox data
-            #         infobox_text = self._extract_infobox_data(el, current_section)
-            #         if infobox_text:
-            #             current_section["text_parts"].append(infobox_text)
-            #         continue
-
             if el.name == "table":
                 classes = el.get("class", [])
-                class_str = " ".join(classes).lower() if classes else ""
+                class_str = " ".join(classes) if classes else ""
+                if "infobox" in class_str.lower():
+                    # Extract structured infobox data
+                    infobox_text = self._extract_infobox_data(el, current_section)
+                    if infobox_text:
+                        current_section["text_parts"].append(infobox_text)
+                    continue
+                else:
+                    table_json = self._extract_table_generic_json(el, current_section)
 
-                table_json = self._extract_table_generic_json(el, current_section)
+                    if table_json:
+                        current_section["text_parts"].append(
+                            json.dumps(table_json, ensure_ascii=False)
+                        )
+                    continue
 
-                if table_json:
-                    current_section["text_parts"].append(
-                        json.dumps(table_json, ensure_ascii=False)
-                    )
-                continue
+            # if el.name == "table":
+            #     classes = el.get("class", [])
+            #     class_str = " ".join(classes).lower() if classes else ""
+            #
+            #     table_json = self._extract_table_generic_json(el, current_section)
+            #
+            #     if table_json:
+            #         current_section["text_parts"].append(
+            #             json.dumps(table_json, ensure_ascii=False)
+            #         )
+            #     continue
 
             # Text content
             if el.name in {"p", "ul", "ol", "table"}:
                 text = el.get_text(" ", strip=True)
                 if text:
                     current_section["text_parts"].append(text)
+                    if self.texts_chars_count(current_section.get("text_parts", [])) > 2000:
+                        text_parts = current_section.pop("text_parts", [])
+                        current_section["text"] = "\n\n".join(text_parts).strip()
+                        if current_section["text"]:  # Only add non-empty sections
+                            sections.append(current_section)
+
+                        current_section = {
+                            "title": current_section["title"],
+                            "title_path": current_section["title_path"],
+                            "level": current_section["level"],
+                            "text_parts": [],
+                            "images": [],
+                        }
+                        continue
 
             # Images in this element
             for img in el.select(":scope > a > img, :scope > span > a > img"):
@@ -417,17 +444,6 @@ class WikipediaArticleScraper(BasePageScraper):
                 if value_cell:
                     # Extract text, handling links and lists
                     value_parts = []
-
-                    # Handle links in the value
-                    for link in value_cell.find_all("a"):
-                        href = link.get("href", "")
-                        link_text = link.get_text(" ", strip=True)
-                        if href.startswith("/wiki/"):
-                            link_part = href.split("/wiki/")[1]
-                            if ":" not in link_part:
-                                title = unquote(link_part).replace("_", " ")
-                                section["links"].append(title)
-                        value_parts.append(link_text)
 
                     # If no links found, get all text
                     if not value_parts:
