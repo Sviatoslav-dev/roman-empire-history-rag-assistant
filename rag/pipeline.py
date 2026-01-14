@@ -9,6 +9,13 @@ import torch
 from models.schemas import ChatMessage, RetrievedContext, RetrievedImage
 from rag.retriever import QdrantRetriever
 
+# --- LangChain additions ---
+from langchain_core.prompts import PromptTemplate
+from langchain_core.documents import Document
+from langchain.chains.retrieval_qa.base import RetrievalQA
+from langchain_core.retrievers import BaseRetriever
+from langchain_core.language_models.llms import LLM
+
 load_dotenv()
 
 LLM_MODEL_PATH = os.getenv("LLM_MODEL_PATH")
@@ -66,6 +73,72 @@ class LLMClient:
         # Remove the prompt from the response
         response = response[len(prompt):].strip()
         return response
+
+
+# ---- LangChain wrappers ----
+class LangChainLLM(LLM):
+    """LangChain LLM wrapper that delegates to our LLMClient."""
+    def __init__(self, client: LLMClient, max_length: int = 512, temperature: float = 0.7):
+        super().__init__()
+        self._client = client
+        self._max_length = max_length
+        self._temperature = temperature
+
+    @property
+    def _llm_type(self) -> str:
+        return "custom-llama3-client"
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        text = self._client.generate(prompt, max_length=self._max_length, temperature=self._temperature)
+        if stop:
+            for s in stop:
+                if s in text:
+                    text = text.split(s)[0]
+        return text
+
+
+class QdrantLangChainRetriever(BaseRetriever):
+    """Adapter to use our existing QdrantRetriever inside LangChain."""
+    def __init__(self, retriever: QdrantRetriever, top_k_text: int = 5):
+        super().__init__()
+        self._retriever = retriever
+        self._top_k = top_k_text
+
+    def _get_relevant_documents(self, query: str) -> List[Document]:
+        results = self._retriever.search_text(query, top_k=self._top_k)
+        docs: List[Document] = []
+        for text, score, metadata in results:
+            docs.append(Document(page_content=text, metadata={**metadata, "score": score}))
+        return docs
+
+    async def _aget_relevant_documents(self, query: str) -> List[Document]:
+        # For simplicity, use sync path
+        return self._get_relevant_documents(query)
+
+
+def build_langchain_rag_chain(llm_client: Optional[LLMClient] = None, retriever: Optional[QdrantRetriever] = None, top_k_text: int = 5) -> RetrievalQA:
+    """Create a LangChain RetrievalQA chain using our components."""
+    llm_client = llm_client or LLMClient()
+    lc_llm = LangChainLLM(llm_client)
+    retriever = retriever or QdrantRetriever()
+    lc_retriever = QdrantLangChainRetriever(retriever, top_k_text=top_k_text)
+
+    template = (
+        "You are a helpful assistant specializing in Roman Empire history. "
+        "Use the provided context to answer succinctly and accurately.\n\n"
+        "Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+    )
+    prompt = PromptTemplate(template=template, input_variables=["context", "question"])
+
+    # We construct a RetrievalQA that uses our adapter retriever.
+    chain = RetrievalQA.from_chain_type(
+        llm=lc_llm,
+        chain_type="stuff",
+        retriever=lc_retriever,
+        return_source_documents=True,
+        chain_type_kwargs={"prompt": prompt}
+    )
+    return chain
 
 
 class RAGPipeline:
@@ -163,6 +236,14 @@ if __name__ == "__main__":
 
     pipeline = RAGPipeline()
     answer, retrieved = pipeline.generate_answer(sample_question)
+
+    # Optional: LangChain demo if desired
+    if os.environ.get("RAG_USE_LANGCHAIN", "0") == "1":
+        print("\nRunning LangChain RetrievalQA demo...\n")
+        lc_chain = build_langchain_rag_chain(top_k_text=5)
+        lc_result = lc_chain.invoke({"query": sample_question})
+        print("LangChain answer:")
+        print(lc_result.get("result"))
 
     print("Question:")
     print(sample_question)
