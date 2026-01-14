@@ -2,11 +2,14 @@
 import os
 
 import torch
+from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 import open_clip
 from PIL import Image
 import numpy as np
 from typing import List, Union
+
+load_dotenv()
 
 TEXT_EMBEDDING_MODEL = os.getenv("TEXT_EMBEDDING_MODEL")
 IMAGE_EMBEDDING_MODEL = os.getenv("IMAGE_EMBEDDING_MODEL")

@@ -202,6 +202,8 @@ class WikipediaArticleScraper(BasePageScraper):
                     if current_section["text"]:  # Only add non-empty sections
                         if current_section["title"] not in ("References", "Notes", "See also", "External links"):
                             sections.append(current_section)
+                        else:
+                            print()
 
                 current_section = {
                     "title": title_text,
@@ -217,7 +219,8 @@ class WikipediaArticleScraper(BasePageScraper):
                 text_parts = current_section.pop("text_parts", [])
                 current_section["text"] = "\n\n".join(text_parts).strip()
                 if current_section["text"]:  # Only add non-empty sections
-                    sections.append(current_section)
+                    if current_section["title"] not in ("References", "Notes", "See also", "External links"):
+                        sections.append(current_section)
 
                 current_section = {
                     "title": current_section["title"],
@@ -273,7 +276,8 @@ class WikipediaArticleScraper(BasePageScraper):
                         text_parts = current_section.pop("text_parts", [])
                         current_section["text"] = "\n\n".join(text_parts).strip()
                         if current_section["text"]:  # Only add non-empty sections
-                            sections.append(current_section)
+                            if current_section["title"] not in ("References", "Notes", "See also", "External links"):
+                                sections.append(current_section)
 
                         current_section = {
                             "title": current_section["title"],
@@ -323,7 +327,8 @@ class WikipediaArticleScraper(BasePageScraper):
             text_parts = current_section.pop("text_parts", [])
             current_section["text"] = "\n\n".join(text_parts).strip()
             if current_section["text"]:
-                sections.append(current_section)
+                if current_section["title"] not in ("References", "Notes", "See also", "External links"):
+                    sections.append(current_section)
 
         # Filter out empty sections
         sections = [s for s in sections if s.get("text")]

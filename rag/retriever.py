@@ -1,11 +1,14 @@
 """Vector database retriever."""
 import os
 
+from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from typing import List, Tuple, Optional
 
 from rag.embedding import TextEmbedder, ImageEmbedder
+
+load_dotenv()
 
 QDRANT_HOST = os.getenv("QDRANT_HOST")
 QDRANT_PORT = os.getenv("QDRANT_PORT")
@@ -61,23 +64,23 @@ class QdrantRetriever:
     ) -> List[Tuple[str, float, dict]]:
         """Search for relevant text chunks."""
         query_vector = self.text_embedder.embed(query)[0]
-        
-        results = self.client.search(
+
+        results = self.client.query_points(
             collection_name=TEXT_COLLECTION_NAME,
-            query_vector=query_vector.tolist(),
+            query=query_vector.tolist(),
             limit=top_k,
             score_threshold=score_threshold
         )
-        
+
         return [
             (
                 point.payload.get("text", ""),
                 point.score,
                 {k: v for k, v in point.payload.items() if k != "text"}
             )
-            for point in results
+            for point in results.points
         ]
-    
+
     def search_images(
         self,
         query_image_path: str,
@@ -86,19 +89,20 @@ class QdrantRetriever:
     ) -> List[Tuple[dict, float]]:
         """Search for similar images."""
         query_vector = self.image_embedder.embed(query_image_path)[0]
-        
-        results = self.client.search(
+
+        results = self.client.query_points(
             collection_name=IMAGE_COLLECTION_NAME,
-            query_vector=query_vector.tolist(),
+            query=query_vector.tolist(),
             limit=top_k,
-            score_threshold=score_threshold
+            score_threshold=score_threshold,
+            with_payload=True
         )
-        
+
         return [
             (point.payload, point.score)
-            for point in results
+            for point in results.points
         ]
-    
+
     def search_text_by_text(
         self,
         query: str,
@@ -118,18 +122,19 @@ class QdrantRetriever:
         query_vector = self.image_embedder.embed_text(query)[0]
         
         # Search images collection using the text embedding
-        results = self.client.search(
+        results = self.client.query_points(
             collection_name=IMAGE_COLLECTION_NAME,
-            query_vector=query_vector.tolist(),
+            query=query_vector.tolist(),
             limit=top_k,
-            score_threshold=score_threshold
+            score_threshold=score_threshold,
+            with_payload=True
         )
-        
+
         return [
             (point.payload, point.score)
-            for point in results
+            for point in results.points
         ]
-    
+
     def add_text_chunks(
         self,
         texts: List[str],
