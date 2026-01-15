@@ -5,45 +5,23 @@ import os
 from typing import List
 
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
+from data_ingestion.wikipedia_article_filter import WikipediaArticleFilter
 from data_ingestion.wikipedia_loader import WikipediaLoader
 from data_ingestion.wikipedia_storage import WikipediaStorage
 from logger import get_logger
 
 logger = get_logger(__name__)
 
+_article_filter = WikipediaArticleFilter()
+
 
 class WikipediaCollector:
     """High-level orchestration of Wikipedia article collection workflow."""
-
-    MIN_ARTICLE_LENGTH = 2000  # Minimum number of characters in the articles
-    MIN_ARTICLE_CITATIONS = 3  # Minimum number of citations in the articles
 
     def __init__(self, wikipedia_loader: WikipediaLoader, wikipedia_storage: WikipediaStorage) -> None:
         self.loader = wikipedia_loader
         self.storage = wikipedia_storage
 
-
-    def filter_articles(self, articles: List[WikipediaArticleScraper]) -> List[WikipediaArticleScraper]:
-        """Filter article scrapers using quality criteria.
-
-        Args:
-            articles: List of WikipediaArticleScraper instances to evaluate.
-
-        Returns:
-            A list of scrapers that passed the quality filters.
-        """
-        filtered: List[WikipediaArticleScraper] = []
-
-        for article in articles:
-            try:
-                if article.passes_quality_filters(
-                        self.MIN_ARTICLE_LENGTH,
-                        self.MIN_ARTICLE_CITATIONS,
-                ):
-                    filtered.append(article)
-            except Exception as e:
-                logger.error("Filter error for %s: %s", article.title, e)
-        return filtered
 
     def collect_articles(self, categories_file: str) -> List[WikipediaArticleScraper]:
         """Load category names from a file, download articles, and filter them.
@@ -70,7 +48,7 @@ class WikipediaCollector:
         self.loader.fetch_pages_by_titles(article_titles)
 
         downloaded_articles = self.storage.get_downloaded_articles()
-        filtered_articles = self.filter_articles(downloaded_articles)
+        filtered_articles = _article_filter.filter_articles(downloaded_articles)
 
         failed = [r for r in downloaded_articles if r not in filtered_articles]
         logger.info("Articles scanned: %d; passed: %d; failed: %d", len(downloaded_articles), len(filtered_articles), len(failed))
