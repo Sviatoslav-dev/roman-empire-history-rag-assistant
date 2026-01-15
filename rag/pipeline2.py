@@ -1,10 +1,10 @@
 """RAG pipeline for question answering."""
 import os
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
-from llama_cpp import Llama
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
 
 from models.schemas import ChatMessage, RetrievedContext, RetrievedImage
 from rag.retriever import QdrantRetriever
@@ -18,40 +18,68 @@ from langchain_core.language_models.llms import LLM
 
 load_dotenv()
 
-# GGUF model path - Qwen 2.5 3B Instruct quantized
-PROJECT_ROOT = Path(__file__).parent.parent
-LLM_MODEL_PATH = str(PROJECT_ROOT / "models" / "qwen2.5-3b-instruct-q4_k_m.gguf")#os.getenv("LLM_MODEL_PATH", "models/Qwen2.5-3B-Instruct.Q4_K_M.gguf")
-# Number of layers to offload to GPU (0 = CPU only, -1 = all layers)
-N_GPU_LAYERS = int(os.getenv("N_GPU_LAYERS", "-1"))
-# Context window size
-N_CTX = int(os.getenv("N_CTX", "4096"))
+# LLaMA 3 8B is the recommended model, but falls back to lightweight for compatibility
+LLM_MODEL_PATH = os.getenv("LLM_MODEL_PATH", "meta-llama/Llama-3.1-8B-Instruct")
+# Set to True to use 4-bit quantization (reduces memory from 16GB to ~5GB)
+USE_QUANTIZATION = os.getenv("USE_QUANTIZATION", "true").lower() == "true"
 
 class LLMClient:
-    """LLM client using llama-cpp-python for GGUF models."""
+    """LLM client supporting LLaMA 3 8B, seq2seq (Flan-T5), and causal LM models."""
 
-    def __init__(self, model_path: str = None, n_gpu_layers: int = None, n_ctx: int = None):
+    def __init__(self, model_name: str = None, use_quantization: bool = None):
         """Initialize LLM client.
 
         Args:
-            model_path: Path to GGUF model file (default: LLM_MODEL_PATH env var)
-            n_gpu_layers: Number of layers to offload to GPU (default: N_GPU_LAYERS env var)
-            n_ctx: Context window size (default: N_CTX env var)
+            model_name: HuggingFace model name (default: LLM_MODEL_PATH env var)
+            use_quantization: Use 4-bit quantization for LLaMA models (default: USE_QUANTIZATION env var)
         """
-        self.model_path = model_path or LLM_MODEL_PATH
-        self.n_gpu_layers = n_gpu_layers if n_gpu_layers is not None else N_GPU_LAYERS
-        self.n_ctx = n_ctx if n_ctx is not None else N_CTX
+        self.model_name = model_name or LLM_MODEL_PATH
+        self.use_quantization = use_quantization if use_quantization is not None else USE_QUANTIZATION
 
-        print(f"Loading LLM model: {self.model_path}")
-        print(f"GPU layers: {self.n_gpu_layers}")
-        print(f"Context size: {self.n_ctx}")
+        # Determine device: MPS for Apple Silicon, CUDA for NVIDIA, CPU otherwise
+        if torch.backends.mps.is_available():
+            self.device = "mps"
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+        else:
+            self.device = "cpu"
 
-        self.model = Llama(
-            model_path=self.model_path,
-            n_gpu_layers=self.n_gpu_layers,
-            n_ctx=self.n_ctx,
-            verbose=False,
+        print(f"Loading LLM model: {self.model_name}")
+        print(f"Device: {self.device}")
+        print(f"Quantization: {self.use_quantization}")
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+
+        # Set pad token if not set (needed for LLaMA)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+        # Prepare quantization config for LLaMA models
+        quantization_config = None
+        if self.use_quantization and ("llama" in self.model_name.lower() or "meta-llama" in self.model_name.lower()):
+            # quantization_config = BitsAndBytesConfig(
+            #     load_in_4bit=True,
+            #     bnb_4bit_compute_dtype=torch.float16,
+            #     bnb_4bit_quant_type="nf4",
+            #     bnb_4bit_use_double_quant=True,
+            # )
+            quantization_config = None
+            print("Using 4-bit quantization (reduces memory from ~16GB to ~5GB)")
+
+        # Try seq2seq model first (Flan-T5, T5, BART)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            torch_dtype=torch.float32 if self.device == "cpu" else torch.float16,
+            # quantization_config=quantization_config,
+            device_map="auto" if quantization_config else None,
         )
-        print(f"✓ Model loaded successfully")
+        self.model_type = "seq2seq"
+        if not quantization_config:
+            self.model.to(self.device)
+
+        self.model.eval()  # Set to evaluation mode
+        print(f"✓ Model loaded successfully as {self.model_type} model")
 
 
     def generate(
@@ -62,19 +90,50 @@ class LLMClient:
         top_p: float = 0.9
     ) -> str:
         """Generate text from prompt."""
-        if self.model is None:
+        if self.model is None or self.tokenizer is None:
+            # Placeholder response
             return "⚠️ LLM not loaded. Please configure your model. See error messages above."
 
-        response = self.model(
+        inputs = self.tokenizer(
             prompt,
-            max_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            echo=False,
-            stop=["User:", "Question:", "\n\n\n"],
+            return_tensors="pt",
+            truncation=True,
+            max_length=2048,  # LLaMA supports longer contexts
+            padding=True
         )
 
-        return response["choices"][0]["text"].strip()
+        # Move to device if not using quantization (quantization uses device_map)
+        if not self.use_quantization or self.model_type == "seq2seq":
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            if self.model_type == "seq2seq":
+                # For seq2seq models (Flan-T5), we generate directly
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=True if temperature > 0 else False,
+                    pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+                )
+                response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            else:
+                # For causal LM models (GPT-2, LLaMA, etc.)
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=True if temperature > 0 else False,
+                    pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                    repetition_penalty=1.1,  # Reduce repetition for LLaMA
+                )
+                full_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                # Remove the prompt from the response
+                response = full_text[len(prompt):].strip()
+
+        return response
 
 
 # ---- LangChain wrappers ----
@@ -231,8 +290,7 @@ if __name__ == "__main__":
     # or `python rag/pipeline.py` from the project root.
     sample_question = os.environ.get(
         "RAG_DEMO_QUESTION",
-        # "Who was Augustus?"
-        "What is Byzantine Empire?"
+        "Who was Augustus?"
     )
 
     print("Running RAG pipeline demo...\n")

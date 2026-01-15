@@ -25,5 +25,4 @@ wikipedia==1.4.0
 
 # --- Added for LangChain-based pipeline and LLM ---
 langchain==0.3.10
-transformers==4.44.2
-torch==2.9.1
+llama-cpp-python>=0.2.0  # For GGUF model support
