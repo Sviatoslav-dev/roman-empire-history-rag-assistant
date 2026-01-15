@@ -16,7 +16,7 @@ _storage = WikipediaStorage()
 class WikipediaLoader:
     """Coordinates loading Wikipedia data from external sources."""
 
-    RATE_LIMIT_DELAY = 0.5
+    RATE_LIMIT_DELAY = 0.5  # seconds between requests
 
     def get_all_articles_from_categories(self, categories: List[str]) -> Set[str]:
         """Collect article titles from the given Wikipedia categories.
