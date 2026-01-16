@@ -95,47 +95,57 @@ class WikipediaCollector:
         self.loader.download_images([image for chunk in chunks for image in chunk["images"]])
 
 
+        # Store text chunks with IDs and prepare metadata
         chunk_texts = [chunk["text"] for chunk in chunks]
-        for chunk in chunks:
-            del chunk["text"]
+        chunk_metadata = []
 
+        for i, chunk in enumerate(chunks):
+            metadata = {
+                "page_title": chunk["page_title"],
+                "page_url": chunk["page_url"],
+                "section_title": chunk["section_title"],
+                "section_path": chunk["section_path"],
+                "section_level": chunk["section_level"],
+                "image_urls": chunk["images"],  # Store image URLs for reference
+            }
+            chunk_metadata.append(metadata)
+
+        # Add text chunks to vector DB
         self.retriever.add_text_chunks(
             chunk_texts,
-            chunks,
+            chunk_metadata,
             ids=list(range(len(chunks))),
         )
 
+        # Process and store images with proper links to text chunks
         image_paths: List[str] = []
         image_metadata: List[Dict] = []
         failed_downloads = 0
         images = 0
-        image_id = 0
 
-        for chunk_metadata in chunks:
+        for chunk_idx, chunk in enumerate(chunks):
+            chunk_id = chunk_idx  # The text chunk ID
 
-            for img_url in chunk_metadata["images"]:
+            for img_url in chunk["images"]:
                 if "Blank.png" in img_url:
                     continue
 
                 if "/thumb/" in img_url:
                     img_url = self.loader._convert_thumbnail_to_fullsize(img_url)
+
                 # Handle File: URLs - these are page URLs, not direct image URLs
-                # We should skip these as they require API calls to get the actual image URL
                 if "/wiki/File:" in img_url or "/wiki/Image:" in img_url or "/w/extensions/wikihiero" in img_url:
-                    # These are page URLs, not direct image URLs
-                    # Skip them for now (would need MediaWiki API to resolve)
                     continue
 
                 # Validate URL before processing
                 if not img_url or not isinstance(img_url, str):
                     continue
+
                 # Check for malformed URLs (duplicate filenames in path)
                 url_parts = img_url.split("/")
                 if len(url_parts) >= 2:
                     last_two = url_parts[-2:]
-                    # If last two parts are the same (except for query params), it's malformed
                     if last_two[0].split("?")[0] == last_two[1].split("?")[0] and last_two[0].split("?")[0]:
-                        # Remove the duplicate
                         img_url = "/".join(url_parts[:-1])
 
                 # Normalize the URL
@@ -144,54 +154,54 @@ class WikipediaCollector:
                 elif img_url.startswith("/"):
                     img_url = "https://en.wikipedia.org" + img_url
 
-                # Try to download the image (download_image handles URL conversion)
+                # Try to download the image
                 images += 1
                 if images % 100 == 0:
                     print(f"Downloading image #{images}")
-                # continue
 
                 image_title = self.loader._extract_image_filename(img_url)
                 local_path = self.storage.image_filepath(image_title)
 
-                if "Western_and_Eastern_Roman_Empires_476AD%283%29.svg" in img_url:
-                    print(f"Debug: Downloaded image path: {local_path}")
-
                 if not local_path:
                     failed_downloads += 1
-                    # Skip if download failed
                     continue
 
-                image_paths.append(local_path)
+                image_paths.append(str(local_path))
+                # Store metadata with proper connection to text chunk
                 image_metadata.append(
                     {
-                        "page_title": chunk_metadata["page_title"],
-                        "page_url": img_url,
-                        "section_title": chunk_metadata["section_title"],
-                        "section_path": chunk_metadata["section_path"],
+                        "page_title": chunk["page_title"],
+                        "page_url": chunk["page_url"],
+                        "local_path": str(local_path),
+                        "section_title": chunk["section_title"],
+                        "section_path": chunk["section_path"],
+                        "section_level": chunk["section_level"],
                         "image_url": img_url,
-                        # "caption": f"Image from {page['title']} – {section.get('title_path')}",
+                        "text_chunk_id": chunk_id,  # Link to parent text chunk
                     }
                 )
-                image_id += 1
 
-        CHUNK_SIZE = 500
-        START_ID = 1_000_000
+        logger.info(f"Total images to store: {len(image_paths)}, Failed downloads: {failed_downloads}")
 
-        for i in range(0, len(image_paths), CHUNK_SIZE):
-            butch_paths = image_paths[i:i + CHUNK_SIZE]
-            butch_metadata = image_metadata[i:i + CHUNK_SIZE] if image_metadata else None
+        # Store images in batches with proper IDs
+        BATCH_SIZE = 500
+        IMAGE_ID_START = 1_000_000
 
-            chunk_ids = list(
+        for i in range(0, len(image_paths), BATCH_SIZE):
+            batch_paths = image_paths[i:i + BATCH_SIZE]
+            batch_metadata = image_metadata[i:i + BATCH_SIZE]
+
+            batch_ids = list(
                 range(
-                    START_ID + i,
-                    START_ID + i + len(butch_paths)
+                    IMAGE_ID_START + i,
+                    IMAGE_ID_START + i + len(batch_paths)
                 )
             )
 
             self.retriever.add_images(
-                butch_paths,
-                butch_metadata,
-                ids=chunk_ids,
+                batch_paths,
+                batch_metadata,
+                ids=batch_ids,
             )
 
         return filtered_articles

@@ -67,7 +67,7 @@ class ImageEmbedder:
                     # Normalize embeddings
                     image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                     embeddings.append(image_features.cpu().numpy().flatten())
-                except Exception as e:
+                except Exception as e:  # TODO: convert svg to another format
                     print(f"Error processing image {image_path}: {e}")
                     # Return zero vector if image can't be processed
                     embeddings.append(np.zeros(512))
@@ -82,15 +82,10 @@ class ImageEmbedder:
         embeddings = []
         with torch.no_grad():
             for text in texts:
-                try:
-                    text_tokens = self.tokenizer(text).to(self.device)
-                    text_features = self.model.encode_text(text_tokens)
-                    # Normalize embeddings
-                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-                    embeddings.append(text_features.cpu().numpy().flatten())
-                except Exception as e:
-                    print(f"Error processing text '{text}': {e}")
-                    # Return zero vector if text can't be processed
-                    embeddings.append(np.zeros(512))
-        
+                text_tokens = self.tokenizer(text).to(self.device)
+                text_features = self.model.encode_text(text_tokens)
+                # Normalize embeddings
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                embeddings.append(text_features.cpu().numpy().flatten())
+
         return np.array(embeddings)

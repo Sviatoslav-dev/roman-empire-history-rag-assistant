@@ -109,8 +109,8 @@ class QdrantLangChainRetriever(BaseRetriever):
     def _get_relevant_documents(self, query: str) -> List[Document]:
         results = self._retriever.search_text(query, top_k=self._top_k)
         docs: List[Document] = []
-        for text, score, metadata in results:
-            docs.append(Document(page_content=text, metadata={**metadata, "score": score}))
+        for text, score, metadata, chunk_id in results:
+            docs.append(Document(page_content=text, metadata={**metadata, "score": score, "chunk_id": chunk_id}))
         return docs
 
     async def _aget_relevant_documents(self, query: str) -> List[Document]:
@@ -156,17 +156,90 @@ class RAGPipeline:
         question: str,
         chat_history: Optional[List[ChatMessage]] = None,
         top_k_text: int = 5,
-        top_k_images: int = 3
+        top_k_images: int = 3,
+        query_image_path: Optional[str] = None
     ) -> Tuple[str, RetrievedContext]:
-        """Generate answer using RAG."""
-        # Retrieve relevant text chunks
-        text_results = self.retriever.search_text(question, top_k=top_k_text)
-        text_chunks = [text for text, score, metadata in text_results]
+        """Generate answer using RAG.
 
-        # Retrieve images based on text query
-        # We'll search for images related to the question
-        # In the future, you can add image query support for "What is this?" queries
-        image_results = self.retriever.search_images_by_text(question, top_k=top_k_images)
+        Args:
+            question: User's text question
+            chat_history: Previous chat messages for context
+            top_k_text: Number of text chunks to retrieve
+            top_k_images: Number of images to retrieve
+            query_image_path: Optional path to query image for image-based search
+
+        Returns:
+            Tuple of (answer, retrieved_context)
+        """
+
+        if query_image_path:
+            # Image-based retrieval: find similar images, then get their associated text chunks
+            image_results = self.retriever.search_images(query_image_path, top_k=top_k_images)
+
+            # Collect unique text chunk IDs from retrieved images
+            text_chunk_ids = set()
+            retrieved_images = []
+
+            for i, (image_metadata, score) in enumerate(image_results):
+                # Add image to results
+                retrieved_images.append(
+                    RetrievedImage(
+                        id=str(i),
+                        url=image_metadata.get("image_url"),
+                        local_path=image_metadata.get("local_path"),
+                        caption=image_metadata.get("caption", ""),
+                        page_title=image_metadata.get("page_title"),
+                        score=float(score)
+                    )
+                )
+
+                # Collect text chunk ID for later retrieval
+                chunk_id = image_metadata.get("text_chunk_id")
+                if chunk_id is not None:
+                    text_chunk_ids.add(chunk_id)
+
+            # Retrieve text chunks associated with found images
+            text_chunks = []
+            for chunk_id in list(text_chunk_ids)[:top_k_text]:
+                result = self.retriever.get_text_chunk_by_id(chunk_id)
+                if result:
+                    text, metadata = result
+                    text_chunks.append(text)
+        else:
+            # Text-based retrieval: find relevant text chunks, then get their associated images
+            text_results = self.retriever.search_text(question, top_k=top_k_text)
+            text_chunks = [text for text, score, metadata, chunk_id in text_results]
+
+            # Retrieve images associated with the retrieved text chunks
+            retrieved_images = []
+            seen_image_paths = set()  # To avoid duplicates
+
+            for text, score, metadata, chunk_id in text_results:
+                # Get all images for this text chunk
+                chunk_images = self.retriever.get_images_by_text_chunk_id(chunk_id)
+
+                for img_metadata in chunk_images:
+                    # Check if we've already added this image
+                    img_path = img_metadata.get("local_path") or img_metadata.get("image_url")
+                    if img_path and img_path not in seen_image_paths:
+                        seen_image_paths.add(img_path)
+                        retrieved_images.append(
+                            RetrievedImage(
+                                id=str(len(retrieved_images)),
+                                url=img_metadata.get("image_url"),
+                                local_path=img_metadata.get("local_path"),
+                                caption=img_metadata.get("caption", ""),
+                                page_title=img_metadata.get("page_title"),
+                                score=float(score)  # Use the text chunk's relevance score
+                            )
+                        )
+
+                        # Stop if we have enough images
+                        if len(retrieved_images) >= top_k_images:
+                            break
+
+                if len(retrieved_images) >= top_k_images:
+                    break
 
         # Build context from retrieved chunks
         context_text = "\n\n".join(text_chunks)
@@ -203,20 +276,7 @@ Assistant:"""
         print(prompt)
         answer = self.llm.generate(prompt)
         
-        # Build retrieved context with actual image data
-        retrieved_images = []
-        for i, (image_metadata, score) in enumerate(image_results):
-            retrieved_images.append(
-                RetrievedImage(
-                    id=str(i),
-                    url=image_metadata.get("image_url"),
-                    local_path=image_metadata.get("image_path"),
-                    caption=image_metadata.get("caption", ""),
-                    page_title=image_metadata.get("page_title"),
-                    score=float(score)
-                )
-            )
-        
+        # Build retrieved context
         context = RetrievedContext(
             text_chunks=text_chunks,
             images=retrieved_images
@@ -232,13 +292,16 @@ if __name__ == "__main__":
     sample_question = os.environ.get(
         "RAG_DEMO_QUESTION",
         # "Who was Augustus?"
-        "What is Byzantine Empire?"
+        # "What is Byzantine Empire?"
+        "What can you say about this picture?"
     )
+
+    image_path = "../tests/data/images/Tunisia-3363_-_Amphitheatre_Spectacle.jpg"
 
     print("Running RAG pipeline demo...\n")
 
     pipeline = RAGPipeline()
-    answer, retrieved = pipeline.generate_answer(sample_question)
+    answer, retrieved = pipeline.generate_answer(sample_question, query_image_path=image_path)
 
     # Optional: LangChain demo if desired
     if os.environ.get("RAG_USE_LANGCHAIN", "0") == "1":
@@ -259,7 +322,11 @@ if __name__ == "__main__":
     if retrieved.text_chunks:
         preview = (retrieved.text_chunks[0] or "").strip().replace("\n", " ")
         print(f"  First chunk preview: {preview[:200]}{'...' if len(preview) > 200 else ''}")
-    print(f"- Images: {len(retrieved.images)}")
+
+    print(f"\n- Images retrieved: {len(retrieved.images)}")
     if retrieved.images:
-        img = retrieved.images[0]
-        print(f"  First image: title={img.page_title or 'n/a'}, caption={(img.caption or '')[:80]}")
+        for i, img in enumerate(retrieved.images, 1):
+            print(f"  [{i}] Title: {img.page_title or 'n/a'}")
+            print(f"      Caption: {(img.caption or 'No caption')[:100]}")
+            print(f"      Score: {img.score:.3f}")
+            print(f"      Path: {img.local_path or img.url or 'n/a'}")

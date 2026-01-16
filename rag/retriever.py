@@ -61,8 +61,12 @@ class QdrantRetriever:
         query: str,
         top_k: int = 5,
         score_threshold: float = 0.5
-    ) -> List[Tuple[str, float, dict]]:
-        """Search for relevant text chunks."""
+    ) -> List[Tuple[str, float, dict, int]]:
+        """Search for relevant text chunks.
+
+        Returns:
+            List of tuples (text, score, metadata, chunk_id)
+        """
         query_vector = self.text_embedder.embed(query)[0]
 
         results = self.client.query_points(
@@ -76,7 +80,8 @@ class QdrantRetriever:
             (
                 point.payload.get("text", ""),
                 point.score,
-                {k: v for k, v in point.payload.items() if k != "text"}
+                {k: v for k, v in point.payload.items() if k != "text"},
+                point.id  # Add chunk ID for linking to images
             )
             for point in results.points
         ]
@@ -134,6 +139,73 @@ class QdrantRetriever:
             (point.payload, point.score)
             for point in results.points
         ]
+
+    def get_images_by_text_chunk_id(
+        self,
+        text_chunk_id: int
+    ) -> List[dict]:
+        """
+        Retrieve all images associated with a specific text chunk ID.
+
+        Args:
+            text_chunk_id: The ID of the text chunk to get images for
+
+        Returns:
+            List of image metadata dictionaries
+        """
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+        # Scroll through all images with the matching text_chunk_id
+        results = self.client.scroll(
+            collection_name=IMAGE_COLLECTION_NAME,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="text_chunk_id",
+                        match=MatchValue(value=text_chunk_id)
+                    )
+                ]
+            ),
+            limit=100,  # Get up to 100 images per chunk
+            with_payload=True,
+            with_vectors=False
+        )
+
+        # results is a tuple of (points, next_page_offset)
+        points = results[0] if results else []
+
+        return [point.payload for point in points]
+
+    def get_text_chunk_by_id(
+        self,
+        chunk_id: int
+    ) -> Optional[Tuple[str, dict]]:
+        """
+        Retrieve a specific text chunk by its ID.
+
+        Args:
+            chunk_id: The ID of the text chunk to retrieve
+
+        Returns:
+            Tuple of (text, metadata) or None if not found
+        """
+        try:
+            point = self.client.retrieve(
+                collection_name=TEXT_COLLECTION_NAME,
+                ids=[chunk_id],
+                with_payload=True,
+                with_vectors=False
+            )
+
+            if point and len(point) > 0:
+                payload = point[0].payload
+                return (
+                    payload.get("text", ""),
+                    {k: v for k, v in payload.items() if k != "text"}
+                )
+            return None
+        except Exception:
+            return None
 
     def add_text_chunks(
         self,
