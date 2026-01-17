@@ -92,7 +92,7 @@ class WikipediaCollector:
 
         chunks = self.split_articles_into_chunks(filtered_articles)
         logger.info("Total article chunks created: %d", len(chunks))
-        self.loader.download_images([image for chunk in chunks for image in chunk["images"]])
+        self.loader.download_images([image["src"] for chunk in chunks for image in chunk["images"]])
 
 
         # Store text chunks with IDs and prepare metadata
@@ -106,7 +106,7 @@ class WikipediaCollector:
                 "section_title": chunk["section_title"],
                 "section_path": chunk["section_path"],
                 "section_level": chunk["section_level"],
-                "image_urls": chunk["images"],  # Store image URLs for reference
+                # "image_urls": chunk["images"],  # Store image URLs for reference
             }
             chunk_metadata.append(metadata)
 
@@ -126,7 +126,8 @@ class WikipediaCollector:
         for chunk_idx, chunk in enumerate(chunks):
             chunk_id = chunk_idx  # The text chunk ID
 
-            for img_url in chunk["images"]:
+            for img in chunk["images"]:
+                img_url = img["src"]
                 if "Blank.png" in img_url:
                     continue
 
@@ -177,6 +178,7 @@ class WikipediaCollector:
                         "section_path": chunk["section_path"],
                         "section_level": chunk["section_level"],
                         "image_url": img_url,
+                        # "caption": "",
                         "text_chunk_id": chunk_id,  # Link to parent text chunk
                     }
                 )

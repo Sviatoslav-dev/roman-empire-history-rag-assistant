@@ -4,6 +4,8 @@ import json
 from typing import Optional, List, Dict
 from urllib.parse import unquote
 
+import bs4
+
 from data_ingestion.scraper.base_page_scraper import BasePageScraper
 from logger import get_logger
 
@@ -136,6 +138,20 @@ class WikipediaArticleScraper(BasePageScraper):
         texts_len = [len(text) for text in texts]
         return sum(texts_len)
 
+    def _content_elements(self, parent):
+        search_tags = ["h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "table", "div", "figure", "meta", "link"]
+
+        elements = []
+
+        content_elements = parent.find_all(search_tags, recursive=False)
+
+        for el in content_elements:
+            if el.name in ("meta", "link"):
+                content_elements.extend(self._content_elements(el))
+            else:
+                elements.append(el)
+        return elements
+
     def split_by_sections(self) -> List[Dict]:
         """
         Parse article HTML into a flat list of sections (split on h2–h6) and
@@ -156,15 +172,30 @@ class WikipediaArticleScraper(BasePageScraper):
         for tag in self.soup.find_all(class_="side-box"):
             tag.decompose()
 
-        content_root = self.soup.find("div", id="mw-content-text")
+        # content_root = self.soup.find("div", id="mw-content-text")
+        content_root = self.soup.find("div", class_="mw-content-ltr")
         if content_root is None:
-            # Try alternative selectors
-            content_root = self.soup.find("div", class_="mw-parser-output")
-            if content_root is None:
-                print("Warning: Could not find content root in HTML")
-                return [], set()
+            raise Exception("Could not find content root in HTML")
+        # if content_root is None:
+        #     # Try alternative selectors
+        #     content_root = self.soup.find("div", class_="mw-parser-output")
+        #     if content_root is None:
+        #         print("Warning: Could not find content root in HTML")
+        #         return [], set()
+
+        # content_tags = ["h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "table", "div", "figure"]
 
         sections: List[Dict] = []
+
+
+        # content_elements = content_root.find_all(content_tags, recursive=False)
+        #
+        # unclosed_head_elements = content_root.find_all(["meta", "link"], recursive=False)
+        # for meta_element in unclosed_head_elements:
+        #     content_elements.extend(
+        #         meta_element.find_all(content_tags, recursive=False))
+
+        content_elements = self._content_elements(content_root)
 
         heading_stack: List[tuple[int, str]] = []
         current_section: Optional[Dict] = {
@@ -177,14 +208,18 @@ class WikipediaArticleScraper(BasePageScraper):
 
         # Iterate over all elements in the content area
         # Use direct children first, then descendants for nested content
-        for el in content_root.find_all(["h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "table", "div", "figure"]):
+        for el in content_elements:
+            el_classes = " ".join(el.get("class", [])).lower()
+
             if not getattr(el, "name", None):
                 continue
 
             # New section starts at h2–h6
-            if el.name in {"h2", "h3", "h4", "h5", "h6"}:
-                level = int(el.name[1])
-                title_text = el.get_text(" ", strip=True)
+            # if el.name in {"h2", "h3", "h4", "h5", "h6"}:
+            if h := el.find(["h2", "h3", "h4", "h5", "h6"]):
+                level = int(h.name[1])
+                title_text = h.get_text(" ", strip=True)
+                # title_text = el.get_text(" ", strip=True)
                 if not title_text:
                     continue
 
@@ -200,7 +235,7 @@ class WikipediaArticleScraper(BasePageScraper):
                     text_parts = current_section.pop("text_parts", [])
                     current_section["text"] = "\n\n".join(text_parts).strip()
                     if current_section["text"]:  # Only add non-empty sections
-                        if current_section["title"] not in ("References", "Notes", "See also", "External links"):
+                        if current_section["title"] not in ("References", "Notes", "See also", "External links", "Citations", "Bibliography", "Sources"):
                             sections.append(current_section)
                         else:
                             print()
@@ -214,12 +249,16 @@ class WikipediaArticleScraper(BasePageScraper):
                 }
                 continue
 
-            if el.name == "figure":
+            if current_section["title"] in ("References", "Notes", "See also", "External links", "Citations", "Bibliography", "Sources"):
+                current_section = None
+                break
+
+            if el.name == "figure" and not current_section.get("text_parts", None):
                 # Finalize previous section
                 text_parts = current_section.pop("text_parts", [])
                 current_section["text"] = "\n\n".join(text_parts).strip()
                 if current_section["text"]:  # Only add non-empty sections
-                    if current_section["title"] not in ("References", "Notes", "See also", "External links"):
+                    if current_section["title"] not in ("References", "Notes", "See also", "External links", "Citations", "Bibliography", "Sources"):
                         sections.append(current_section)
 
                 current_section = {
@@ -267,6 +306,101 @@ class WikipediaArticleScraper(BasePageScraper):
             #         )
             #     continue
 
+            clses = [
+                "infobox",
+                "thumb",
+                "gallery"
+            ]
+            names = [
+                "figure"
+            ]
+
+
+            if list(el.select(".infobox")):
+                print()
+
+            if list(el.select("a img")):
+                el_classes = " ".join(el.get("class", [])).lower()
+
+                if any(c in el_classes for c in clses):
+                    print()
+
+                if el.name not in names and not any(c in el_classes for c in clses):
+                    print()
+
+
+            if el.name == "figure":
+                img = el.select_one("a img")
+                if img:
+                    src = self._get_image_url(img)
+                    if src:
+                        caption = el.select_one("figcaption").text
+                        current_section["images"].append(
+                            {
+                                "src": src,
+                                "caption": caption
+                            }
+                        )
+                else:
+                    print("Not image found 4")
+                continue
+
+            if "thumb" in el_classes:
+                tsingle_elements = el.select(".tsingle")
+                for ts in tsingle_elements:
+                    img = ts.select_one("a img")
+                    if not img:
+                        print("Not image found 3")
+                        continue
+                    src = self._get_image_url(img)
+
+                    if src is None:
+                        print()
+
+                    thumbcaption = ts.select_one(".thumbcaption")
+
+                    if thumbcaption:
+                        caption = thumbcaption.text.strip()
+                    else:
+                        caption = el.select_one(".thumbcaption").text.strip()
+
+                    current_section["images"].append(
+                        {
+                            "src": src,
+                            "caption": caption
+                        }
+                    )
+                continue
+
+                # if len(list(el.select(".trow"))) > 2:
+                #     print()
+                # else:
+                #     print()
+
+            if "gallery" in el_classes:
+                for gallery_item in el.select(".gallerybox"):
+                    img = gallery_item.select_one("a img")
+
+                    if not img:
+                        print("Not image found 2")
+                        continue
+
+                    src = self._get_image_url(img)
+
+                    if src is None:
+                        print()
+
+                    caption_el = gallery_item.select_one(".gallerytext")
+                    caption = caption_el.text.strip() if caption_el else ""
+
+                    current_section["images"].append(
+                        {
+                            "src": src,
+                            "caption": caption
+                        }
+                    )
+                continue
+
             # Text content
             if el.name in {"p", "ul", "ol", "table"}:
                 text = el.get_text(" ", strip=True)
@@ -276,7 +410,7 @@ class WikipediaArticleScraper(BasePageScraper):
                         text_parts = current_section.pop("text_parts", [])
                         current_section["text"] = "\n\n".join(text_parts).strip()
                         if current_section["text"]:  # Only add non-empty sections
-                            if current_section["title"] not in ("References", "Notes", "See also", "External links"):
+                            if current_section["title"] not in ("References", "Notes", "See also", "External links", "Citations", "Bibliography", "Sources"):
                                 sections.append(current_section)
 
                         current_section = {
@@ -288,39 +422,16 @@ class WikipediaArticleScraper(BasePageScraper):
                         }
                         continue
 
+
             # Images in this element
-            for img in el.select(":scope > a > img, :scope > span > a > img"):
+            for img in el.select("a img"):
                 # Try multiple attributes for image source
+                print("skipped image extraction: ", self.url, current_section.get("title_path", None))
 
-                src = img.get("src") or img.get("data-src") or img.get("data-file-width") or img.get("href")
-                if not src:
-                    continue
+                # src = self._get_image_url(img)
+                # if src:
+                #     current_section["images"].append(src)
 
-                # Skip data URIs and very small images (likely icons)
-                if src.startswith("data:") or "icon" in src.lower():
-                    continue
-
-                # Normalize protocol-relative URLs
-                if src.startswith("//"):
-                    src = "https:" + src
-                elif src.startswith("/"):
-                    src = "https://en.wikipedia.org" + src
-                elif not src.startswith("http"):
-                    src = "https://en.wikipedia.org" + src
-
-                current_section["images"].append(src)
-
-            # Links in this element
-            for a in el.find_all("a", recursive=True):
-                href = a.get("href") or ""
-                # Only keep standard article links: /wiki/Title
-                if not href.startswith("/wiki/"):
-                    continue
-                # Skip non-article namespaces like File:, Category:, etc.
-                link_part = href.split("/wiki/")[1]
-                if ":" in link_part:
-                    continue
-                title = unquote(link_part).replace("_", " ")
 
         # Finalize last section
         if current_section is not None:
@@ -334,6 +445,25 @@ class WikipediaArticleScraper(BasePageScraper):
         sections = [s for s in sections if s.get("text")]
 
         return sections
+
+    def _get_image_url(self, img: "bs4.element.Tag") -> Optional[str]:
+        src = img.get("src") or img.get("data-src") or img.get("data-file-width") or img.get("href")
+        if not src:
+            return None
+
+        # Skip data URIs and very small images (likely icons)
+        if src.startswith("data:") or "icon" in src.lower():
+            return None
+
+        # Normalize protocol-relative URLs
+        if src.startswith("//"):
+            src = "https:" + src
+        elif src.startswith("/"):
+            src = "https://en.wikipedia.org" + src
+        elif not src.startswith("http"):
+            src = "https://en.wikipedia.org" + src
+
+        return src
 
     def _extract_table_generic_json(self, table, current_section):
         def clean_text(el):
@@ -467,17 +597,19 @@ class WikipediaArticleScraper(BasePageScraper):
                         infobox_items.append(f"{key}: {value_text}")
 
             # Extract images from infobox
-            for img in row.find_all("img"):
-                src = img.get("src") or img.get("data-src")
-                if src:
-                    # Normalize protocol-relative URLs
-                    if src.startswith("//"):
-                        src = "https:" + src
-                    elif src.startswith("/"):
-                        src = "https://en.wikipedia.org" + src
-                    elif not src.startswith("http"):
-                        src = "https://en.wikipedia.org" + src
-                    section["images"].append(src)
+            img = row.select_one("img")
+
+            if img:
+                src = self._get_image_url(img)
+                if not src:
+                    continue
+
+                section["images"].append(
+                    {
+                        "src": src,
+                        "caption": row.text.strip(),
+                    }
+                )
 
         # Format as readable text
         if infobox_items:
