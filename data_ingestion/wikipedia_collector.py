@@ -94,21 +94,88 @@ class WikipediaCollector:
         logger.info("Total article chunks created: %d", len(chunks))
         self.loader.download_images([image["src"] for chunk in chunks for image in chunk["images"]])
 
-
-        # Store text chunks with IDs and prepare metadata
+        # --- Build text chunk payloads + image dedup maps ---
+        # Normalized model:
+        # - TEXT points contain ONLY text/section/page metadata (no image urls / local paths)
+        # - IMAGE points contain ONLY unique image metadata + embedding
+        # - LINK points contain the many-to-many relations + per-chunk caption/section context
         chunk_texts = [chunk["text"] for chunk in chunks]
-        chunk_metadata = []
+        chunk_metadata: List[Dict] = []
 
-        for i, chunk in enumerate(chunks):
+        unique_images: Dict[str, Dict] = {}
+        links: List[Dict] = []
+
+        # We'll assign deterministic ids for images we upsert in this run
+        IMAGE_ID_START = 1_000_000
+        next_image_id = IMAGE_ID_START
+
+        for chunk_id, chunk in enumerate(chunks):
             metadata = {
                 "page_title": chunk["page_title"],
                 "page_url": chunk["page_url"],
                 "section_title": chunk["section_title"],
                 "section_path": chunk["section_path"],
                 "section_level": chunk["section_level"],
-                # "image_urls": chunk["images"],  # Store image URLs for reference
             }
             chunk_metadata.append(metadata)
+
+            for img in chunk.get("images", []) or []:
+                img_url = img.get("src")
+                if not img_url or not isinstance(img_url, str):
+                    continue
+                if "Blank.png" in img_url:
+                    continue
+
+                # Convert thumb -> fullsize for better dedup + retrieval
+                if "/thumb/" in img_url:
+                    img_url = self.loader._convert_thumbnail_to_fullsize(img_url)
+
+                # Skip non-direct images
+                if "/wiki/File:" in img_url or "/wiki/Image:" in img_url or "/w/extensions/wikihiero" in img_url:
+                    continue
+
+                # Normalize malformed URLs (duplicate last segment)
+                url_parts = img_url.split("/")
+                if len(url_parts) >= 2:
+                    last_two = url_parts[-2:]
+                    if last_two[0].split("?")[0] == last_two[1].split("?")[0] and last_two[0].split("?")[0]:
+                        img_url = "/".join(url_parts[:-1])
+
+                # Normalize protocol/host
+                if img_url.startswith("//"):
+                    img_url = "https:" + img_url
+                elif img_url.startswith("/"):
+                    img_url = "https://en.wikipedia.org" + img_url
+
+                image_key = img_url
+
+                # Create unique image record if not exists
+                if image_key not in unique_images:
+                    image_title = self.loader._extract_image_filename(img_url)
+                    local_path = self.storage.image_filepath(image_title)
+
+                    unique_images[image_key] = {
+                        "image_id": next_image_id,
+                        "image_url": img_url,
+                        "local_path": str(local_path),
+                    }
+                    next_image_id += 1
+
+                image_id = unique_images[image_key]["image_id"]
+                caption = (img.get("caption") or "").strip()
+
+                links.append(
+                    {
+                        "text_chunk_id": chunk_id,
+                        "image_id": image_id,
+                        "caption": caption,
+                        "page_title": chunk["page_title"],
+                        "page_url": chunk["page_url"],
+                        "section_title": chunk.get("section_title"),
+                        "section_path": chunk.get("section_path"),
+                        "section_level": chunk.get("section_level"),
+                    }
+                )
 
         # Add text chunks to vector DB
         self.retriever.add_text_chunks(
@@ -117,94 +184,46 @@ class WikipediaCollector:
             ids=list(range(len(chunks))),
         )
 
-        # Process and store images with proper links to text chunks
+        # --- Store unique images in image collection ---
         image_paths: List[str] = []
         image_metadata: List[Dict] = []
-        failed_downloads = 0
-        images = 0
+        image_ids: List[int] = []
 
-        for chunk_idx, chunk in enumerate(chunks):
-            chunk_id = chunk_idx  # The text chunk ID
+        for rec in unique_images.values():
+            image_ids.append(rec["image_id"])
+            image_paths.append(rec["local_path"])
+            image_metadata.append(
+                {
+                    "image_url": rec["image_url"],
+                    "local_path": rec["local_path"],
+                }
+            )
 
-            for img in chunk["images"]:
-                img_url = img["src"]
-                if "Blank.png" in img_url:
-                    continue
+        logger.info(
+            "Unique images to store: %d (from %d total image mentions)",
+            len(image_paths),
+            sum(len(chunk.get("images", []) or []) for chunk in chunks),
+        )
 
-                if "/thumb/" in img_url:
-                    img_url = self.loader._convert_thumbnail_to_fullsize(img_url)
-
-                # Handle File: URLs - these are page URLs, not direct image URLs
-                if "/wiki/File:" in img_url or "/wiki/Image:" in img_url or "/w/extensions/wikihiero" in img_url:
-                    continue
-
-                # Validate URL before processing
-                if not img_url or not isinstance(img_url, str):
-                    continue
-
-                # Check for malformed URLs (duplicate filenames in path)
-                url_parts = img_url.split("/")
-                if len(url_parts) >= 2:
-                    last_two = url_parts[-2:]
-                    if last_two[0].split("?")[0] == last_two[1].split("?")[0] and last_two[0].split("?")[0]:
-                        img_url = "/".join(url_parts[:-1])
-
-                # Normalize the URL
-                if img_url.startswith("//"):
-                    img_url = "https:" + img_url
-                elif img_url.startswith("/"):
-                    img_url = "https://en.wikipedia.org" + img_url
-
-                # Try to download the image
-                images += 1
-                if images % 100 == 0:
-                    print(f"Downloading image #{images}")
-
-                image_title = self.loader._extract_image_filename(img_url)
-                local_path = self.storage.image_filepath(image_title)
-
-                if not local_path:
-                    failed_downloads += 1
-                    continue
-
-                image_paths.append(str(local_path))
-                # Store metadata with proper connection to text chunk
-                image_metadata.append(
-                    {
-                        "page_title": chunk["page_title"],
-                        "page_url": chunk["page_url"],
-                        "local_path": str(local_path),
-                        "section_title": chunk["section_title"],
-                        "section_path": chunk["section_path"],
-                        "section_level": chunk["section_level"],
-                        "image_url": img_url,
-                        # "caption": "",
-                        "text_chunk_id": chunk_id,  # Link to parent text chunk
-                    }
-                )
-
-        logger.info(f"Total images to store: {len(image_paths)}, Failed downloads: {failed_downloads}")
-
-        # Store images in batches with proper IDs
+        # Store images in batches
         BATCH_SIZE = 500
-        IMAGE_ID_START = 1_000_000
-
         for i in range(0, len(image_paths), BATCH_SIZE):
             batch_paths = image_paths[i:i + BATCH_SIZE]
             batch_metadata = image_metadata[i:i + BATCH_SIZE]
-
-            batch_ids = list(
-                range(
-                    IMAGE_ID_START + i,
-                    IMAGE_ID_START + i + len(batch_paths)
-                )
-            )
+            batch_ids = image_ids[i:i + BATCH_SIZE]
 
             self.retriever.add_images(
                 batch_paths,
                 batch_metadata,
                 ids=batch_ids,
             )
+
+        # --- Store links in link collection ---
+        # Make link ids stable for this ingestion run
+        self.retriever.add_chunk_image_links(
+            links,
+            ids=list(range(0, len(links))),
+        )
 
         return filtered_articles
 

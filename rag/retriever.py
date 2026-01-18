@@ -14,10 +14,12 @@ QDRANT_HOST = os.getenv("QDRANT_HOST")
 QDRANT_PORT = os.getenv("QDRANT_PORT")
 TEXT_COLLECTION_NAME = os.getenv("TEXT_COLLECTION_NAME")
 IMAGE_COLLECTION_NAME = os.getenv("IMAGE_COLLECTION_NAME")
+LINK_COLLECTION_NAME = os.getenv("LINK_COLLECTION_NAME", "chunk_image_links")
+
 
 class QdrantRetriever:
     """Qdrant-based retriever for text and images."""
-    
+
     def __init__(self):
         """Initialize Qdrant client and collections."""
         self.client = QdrantClient(
@@ -26,10 +28,10 @@ class QdrantRetriever:
         )
         self.text_embedder = TextEmbedder()
         self.image_embedder = ImageEmbedder()
-        
+
         # Ensure collections exist
         self._ensure_collections()
-    
+
     def _ensure_collections(self):
         """Create collections if they don't exist."""
         # Text collection (384 dimensions for all-MiniLM-L6-v2)
@@ -43,7 +45,7 @@ class QdrantRetriever:
                     distance=Distance.COSINE
                 )
             )
-        
+
         # Image collection (512 dimensions for OpenCLIP ViT-B-32)
         try:
             self.client.get_collection(IMAGE_COLLECTION_NAME)
@@ -55,7 +57,20 @@ class QdrantRetriever:
                     distance=Distance.COSINE
                 )
             )
-    
+
+        # Link collection: dummy 1D vectors, used only for payload filtering.
+        # Qdrant requires vectors unless you use sparse-only collections; we keep this simple.
+        try:
+            self.client.get_collection(LINK_COLLECTION_NAME)
+        except Exception:
+            self.client.create_collection(
+                collection_name=LINK_COLLECTION_NAME,
+                vectors_config=VectorParams(
+                    size=1,
+                    distance=Distance.COSINE
+                )
+            )
+
     def search_text(
         self,
         query: str,
@@ -112,10 +127,10 @@ class QdrantRetriever:
         self,
         query: str,
         top_k: int = 5
-    ) -> List[Tuple[str, float, dict]]:
-        """Search text using text query (for text-based image search)."""
+    ) -> List[Tuple[str, float, dict, int]]:
+        """Search text using text query."""
         return self.search_text(query, top_k)
-    
+
     def search_images_by_text(
         self,
         query: str,
@@ -125,7 +140,7 @@ class QdrantRetriever:
         """Search for images using a text query by embedding the text with OpenCLIP."""
         # Use OpenCLIP's text encoder to embed the query (same space as images)
         query_vector = self.image_embedder.embed_text(query)[0]
-        
+
         # Search images collection using the text embedding
         results = self.client.query_points(
             collection_name=IMAGE_COLLECTION_NAME,
@@ -144,68 +159,109 @@ class QdrantRetriever:
         self,
         text_chunk_id: int
     ) -> List[dict]:
-        """
-        Retrieve all images associated with a specific text chunk ID.
+        """Retrieve images associated with a specific text chunk ID.
 
-        Args:
-            text_chunk_id: The ID of the text chunk to get images for
-
-        Returns:
-            List of image metadata dictionaries
+        Uses the LINK_COLLECTION to resolve chunk -> image ids, then retrieves image payloads.
+        Each returned image payload is augmented with link-specific fields (caption, section info)
+        from the link records.
         """
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-        # Scroll through all images with the matching text_chunk_id
-        results = self.client.scroll(
-            collection_name=IMAGE_COLLECTION_NAME,
+        link_points, _ = self.client.scroll(
+            collection_name=LINK_COLLECTION_NAME,
             scroll_filter=Filter(
                 must=[
-                    FieldCondition(
-                        key="text_chunk_id",
-                        match=MatchValue(value=text_chunk_id)
-                    )
+                    FieldCondition(key="text_chunk_id", match=MatchValue(value=text_chunk_id))
                 ]
             ),
-            limit=100,  # Get up to 100 images per chunk
+            limit=500,
             with_payload=True,
             with_vectors=False
         )
 
-        # results is a tuple of (points, next_page_offset)
-        points = results[0] if results else []
+        if not link_points:
+            return []
 
-        return [point.payload for point in points]
+        # Collect unique image ids
+        image_ids = []
+        link_by_image_id = {}
+        for p in link_points:
+            payload = p.payload or {}
+            image_id = payload.get("image_id")
+            if image_id is None:
+                continue
+            if image_id not in link_by_image_id:
+                link_by_image_id[image_id] = payload
+                image_ids.append(image_id)
 
-    def get_text_chunk_by_id(
+        if not image_ids:
+            return []
+
+        image_points = self.client.retrieve(
+            collection_name=IMAGE_COLLECTION_NAME,
+            ids=image_ids,
+            with_payload=True,
+            with_vectors=False
+        )
+
+        out: List[dict] = []
+        for img_point in image_points or []:
+            img_payload = dict(img_point.payload or {})
+            link_payload = link_by_image_id.get(img_point.id, {})
+            # link-specific info should not live on the image point
+            for k in ("caption", "section_title", "section_path", "section_level", "page_title", "page_url", "text_chunk_id"):
+                if k in link_payload and link_payload.get(k) is not None:
+                    img_payload[k] = link_payload.get(k)
+            out.append(img_payload)
+
+        return out
+
+    def get_text_chunk_ids_by_image_id(self, image_id: int) -> List[int]:
+        """Return all text chunk ids that reference the given image id (via links collection)."""
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+        link_points, _ = self.client.scroll(
+            collection_name=LINK_COLLECTION_NAME,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="image_id", match=MatchValue(value=image_id))
+                ]
+            ),
+            limit=1000,
+            with_payload=True,
+            with_vectors=False
+        )
+
+        ids = []
+        for p in link_points or []:
+            cid = (p.payload or {}).get("text_chunk_id")
+            if cid is not None:
+                ids.append(cid)
+        return ids
+
+    def add_chunk_image_links(
         self,
-        chunk_id: int
-    ) -> Optional[Tuple[str, dict]]:
-        """
-        Retrieve a specific text chunk by its ID.
+        links: List[dict],
+        ids: Optional[List[int]] = None
+    ):
+        """Upsert chunk-image link records into LINK_COLLECTION.
 
-        Args:
-            chunk_id: The ID of the text chunk to retrieve
-
-        Returns:
-            Tuple of (text, metadata) or None if not found
+        Each link dict should include: text_chunk_id, image_id and may include caption,
+        page/section fields.
         """
-        try:
-            point = self.client.retrieve(
-                collection_name=TEXT_COLLECTION_NAME,
-                ids=[chunk_id],
-                with_payload=True,
-                with_vectors=False
+        points = [
+            PointStruct(
+                id=ids[i] if ids else i,
+                vector=[1.0],
+                payload=links[i]
             )
+            for i in range(len(links))
+        ]
 
-            if point and len(point) > 0:
-                payload = point[0].payload
-                return (
-                    payload.get("text", ""),
-                    {k: v for k, v in payload.items() if k != "text"}
-                )
-            return None
-        except Exception:
-            return None
+        self.client.upsert(
+            collection_name=LINK_COLLECTION_NAME,
+            points=points
+        )
 
     def add_text_chunks(
         self,
@@ -268,7 +324,7 @@ class QdrantRetriever:
                     if attempt == max_retries:
                         raise
                     sleep(2 ** (attempt - 1))
-    
+
     def add_images(
         self,
         image_paths: List[str],
@@ -277,7 +333,7 @@ class QdrantRetriever:
     ):
         """Add images to the collection."""
         embeddings = self.image_embedder.embed(image_paths)
-        
+
         points = [
             PointStruct(
                 id=ids[i] if ids else i,
@@ -289,8 +345,25 @@ class QdrantRetriever:
             )
             for i in range(len(image_paths))
         ]
-        
+
         self.client.upsert(
             collection_name=IMAGE_COLLECTION_NAME,
             points=points
         )
+
+    def get_text_chunk_by_id(
+        self,
+        chunk_id: int
+    ) -> Optional[Tuple[str, dict]]:
+        """Retrieve a specific text chunk by its ID."""
+        points = self.client.retrieve(
+            collection_name=TEXT_COLLECTION_NAME,
+            ids=[chunk_id],
+            with_payload=True,
+            with_vectors=False
+        )
+        if points and len(points) > 0:
+            payload = points[0].payload or {}
+            return payload.get("text", ""), {k: v for k, v in payload.items() if k != "text"}
+        return None
+

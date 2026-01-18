@@ -176,67 +176,64 @@ class RAGPipeline:
             # Image-based retrieval: find similar images, then get their associated text chunks
             image_results = self.retriever.search_images(query_image_path, top_k=top_k_images)
 
-            # Collect unique text chunk IDs from retrieved images
             text_chunk_ids = set()
             retrieved_images = []
 
             for i, (image_metadata, score) in enumerate(image_results):
-                # Add image to results
+                image_id = image_metadata.get("image_id")
+
                 retrieved_images.append(
                     RetrievedImage(
                         id=str(i),
                         url=image_metadata.get("image_url"),
-                        local_path=image_metadata.get("local_path"),
-                        caption=image_metadata.get("caption", ""),
-                        page_title=image_metadata.get("page_title"),
+                        local_path=image_metadata.get("local_path") or image_metadata.get("image_path"),
+                        caption=None,
+                        page_title=None,
                         score=float(score)
                     )
                 )
 
-                # Collect text chunk ID for later retrieval
-                chunk_id = image_metadata.get("text_chunk_id")
-                if chunk_id is not None:
-                    text_chunk_ids.add(chunk_id)
+                if image_id is not None:
+                    for cid in self.retriever.get_text_chunk_ids_by_image_id(image_id):
+                        text_chunk_ids.add(cid)
 
-            # Retrieve text chunks associated with found images
             text_chunks = []
             for chunk_id in list(text_chunk_ids)[:top_k_text]:
                 result = self.retriever.get_text_chunk_by_id(chunk_id)
                 if result:
-                    text, metadata = result
+                    text, _metadata = result
                     text_chunks.append(text)
-        else:
-            # Text-based retrieval: find relevant text chunks, then get their associated images
-            text_results = self.retriever.search_text(question, top_k=top_k_text)
-            text_chunks = [text for text, score, metadata, chunk_id in text_results]
 
-            # Retrieve images associated with the retrieved text chunks
+        else:
+            # Text-based retrieval: find relevant text chunks, then resolve their images via link collection
+            text_results = self.retriever.search_text(question, top_k=top_k_text)
+
+            text_chunks = []
             retrieved_images = []
-            seen_image_paths = set()  # To avoid duplicates
+            seen = set()
 
             for text, score, metadata, chunk_id in text_results:
-                # Get all images for this text chunk
+                text_chunks.append(text)
+
                 chunk_images = self.retriever.get_images_by_text_chunk_id(chunk_id)
 
-                for img_metadata in chunk_images:
-                    # Check if we've already added this image
-                    img_path = img_metadata.get("local_path") or img_metadata.get("image_url")
-                    if img_path and img_path not in seen_image_paths:
-                        seen_image_paths.add(img_path)
-                        retrieved_images.append(
-                            RetrievedImage(
-                                id=str(len(retrieved_images)),
-                                url=img_metadata.get("image_url"),
-                                local_path=img_metadata.get("local_path"),
-                                caption=img_metadata.get("caption", ""),
-                                page_title=img_metadata.get("page_title"),
-                                score=float(score)  # Use the text chunk's relevance score
-                            )
+                for img_meta in chunk_images:
+                    img_path = img_meta.get("local_path") or img_meta.get("image_path") or img_meta.get("image_url")
+                    if not img_path or img_path in seen:
+                        continue
+                    seen.add(img_path)
+                    retrieved_images.append(
+                        RetrievedImage(
+                            id=str(len(retrieved_images)),
+                            url=img_meta.get("image_url"),
+                            local_path=img_meta.get("local_path") or img_meta.get("image_path"),
+                            caption=img_meta.get("caption"),
+                            page_title=img_meta.get("page_title"),
+                            score=float(score)
                         )
-
-                        # Stop if we have enough images
-                        if len(retrieved_images) >= top_k_images:
-                            break
+                    )
+                    if len(retrieved_images) >= top_k_images:
+                        break
 
                 if len(retrieved_images) >= top_k_images:
                     break
@@ -293,10 +290,14 @@ if __name__ == "__main__":
         "RAG_DEMO_QUESTION",
         # "Who was Augustus?"
         # "What is Byzantine Empire?"
-        "What can you say about this picture?"
+        # "What was the fertility rate in Roman Egypt for ages 25–29?"
+        "What depicted on this image?"
     )
 
-    image_path = "../tests/data/images/Tunisia-3363_-_Amphitheatre_Spectacle.jpg"
+    # image_path = "../tests/data/images/Tunisia-3363_-_Amphitheatre_Spectacle.jpg"
+    image_path = "../tests/data/images/Colosseum_in_Rome,_Italy_-_April_2007.jpg"
+    # image_path = "../tests/data/images/colosseum.png"
+    # image_path = None
 
     print("Running RAG pipeline demo...\n")
 
