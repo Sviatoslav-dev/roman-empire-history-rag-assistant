@@ -107,7 +107,12 @@ class QdrantRetriever:
         top_k: int = 5,
         score_threshold: float = 0.5
     ) -> List[Tuple[dict, float]]:
-        """Search for similar images."""
+        """Search for similar images.
+
+        Returns a tuple (payload, score). The payload is augmented with `image_id`
+        equal to the Qdrant point id, so downstream code can reliably resolve
+        image↔chunk links.
+        """
         query_vector = self.image_embedder.embed(query_image_path)[0]
 
         results = self.client.query_points(
@@ -118,10 +123,14 @@ class QdrantRetriever:
             with_payload=True
         )
 
-        return [
-            (point.payload, point.score)
-            for point in results.points
-        ]
+        out: List[Tuple[dict, float]] = []
+        for point in results.points:
+            payload = dict(point.payload or {})
+            # If ingestion didn't store image_id in payload, use point.id as the stable id.
+            payload.setdefault("image_id", point.id)
+            out.append((payload, point.score))
+
+        return out
 
     def search_text_by_text(
         self,
@@ -137,11 +146,12 @@ class QdrantRetriever:
         top_k: int = 5,
         score_threshold: float = 0.3
     ) -> List[Tuple[dict, float]]:
-        """Search for images using a text query by embedding the text with OpenCLIP."""
-        # Use OpenCLIP's text encoder to embed the query (same space as images)
+        """Search for images using a text query by embedding the text with OpenCLIP.
+
+        Payload is augmented with `image_id` equal to the Qdrant point id.
+        """
         query_vector = self.image_embedder.embed_text(query)[0]
 
-        # Search images collection using the text embedding
         results = self.client.query_points(
             collection_name=IMAGE_COLLECTION_NAME,
             query=query_vector.tolist(),
@@ -150,10 +160,13 @@ class QdrantRetriever:
             with_payload=True
         )
 
-        return [
-            (point.payload, point.score)
-            for point in results.points
-        ]
+        out: List[Tuple[dict, float]] = []
+        for point in results.points:
+            payload = dict(point.payload or {})
+            payload.setdefault("image_id", point.id)
+            out.append((payload, point.score))
+
+        return out
 
     def get_images_by_text_chunk_id(
         self,
@@ -367,3 +380,24 @@ class QdrantRetriever:
             return payload.get("text", ""), {k: v for k, v in payload.items() if k != "text"}
         return None
 
+    def get_links_by_image_id(self, image_id: int, limit: int = 50) -> List[dict]:
+        """Return link payloads for a given image id.
+
+        Link payloads include relationship-level metadata like caption, section path, and
+        text_chunk_id.
+        """
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+        link_points, _ = self.client.scroll(
+            collection_name=LINK_COLLECTION_NAME,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="image_id", match=MatchValue(value=image_id))
+                ]
+            ),
+            limit=limit,
+            with_payload=True,
+            with_vectors=False
+        )
+
+        return [p.payload or {} for p in (link_points or [])]

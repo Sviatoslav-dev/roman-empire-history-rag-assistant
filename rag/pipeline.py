@@ -59,11 +59,41 @@ class LLMClient:
         prompt: str,
         max_new_tokens: int = 256,
         temperature: float = 0.7,
-        top_p: float = 0.9
+        top_p: float = 0.9,
+        *,
+        system_prompt: Optional[str] = None
     ) -> str:
-        """Generate text from prompt."""
+        """Generate text from prompt.
+
+        If `system_prompt` is provided, uses the chat API with system/user roles to
+        reduce instruction leakage.
+        """
         if self.model is None:
             return "⚠️ LLM not loaded. Please configure your model. See error messages above."
+
+        stop = [
+            "User:",
+            "Question:",
+            "\n\n\n",
+            "CONTEXT:",
+            "QUESTION:",
+            # common prompt-leak patterns
+            "You may receive",
+            "SYSTEM INSTRUCTIONS",
+        ]
+
+        if system_prompt:
+            resp = self.model.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_new_tokens,
+                stop=stop,
+            )
+            return (resp["choices"][0]["message"]["content"] or "").strip()
 
         response = self.model(
             prompt,
@@ -71,7 +101,7 @@ class LLMClient:
             temperature=temperature,
             top_p=top_p,
             echo=False,
-            stop=["User:", "Question:", "\n\n\n"],
+            stop=stop,
         )
 
         return response["choices"][0]["text"].strip()
@@ -118,7 +148,11 @@ class QdrantLangChainRetriever(BaseRetriever):
         return self._get_relevant_documents(query)
 
 
-def build_langchain_rag_chain(llm_client: Optional[LLMClient] = None, retriever: Optional[QdrantRetriever] = None, top_k_text: int = 5) -> RetrievalQA:
+def build_langchain_rag_chain(
+    llm_client: Optional[LLMClient] = None,
+    retriever: Optional[QdrantRetriever] = None,
+    top_k_text: int = 5
+) -> RetrievalQA:
     """Create a LangChain RetrievalQA chain using our components."""
     llm_client = llm_client or LLMClient()
     lc_llm = LangChainLLM(llm_client)
@@ -132,7 +166,6 @@ def build_langchain_rag_chain(llm_client: Optional[LLMClient] = None, retriever:
     )
     prompt = PromptTemplate(template=template, input_variables=["context", "question"])
 
-    # We construct a RetrievalQA that uses our adapter retriever.
     chain = RetrievalQA.from_chain_type(
         llm=lc_llm,
         chain_type="stuff",
@@ -161,125 +194,162 @@ class RAGPipeline:
     ) -> Tuple[str, RetrievedContext]:
         """Generate answer using RAG.
 
-        Args:
-            question: User's text question
-            chat_history: Previous chat messages for context
-            top_k_text: Number of text chunks to retrieve
-            top_k_images: Number of images to retrieve
-            query_image_path: Optional path to query image for image-based search
-
-        Returns:
-            Tuple of (answer, retrieved_context)
+        Contract:
+        - If prompt contains only text: context = text chunks for that text.
+        - If prompt contains an image: context = union of
+            (a) text chunks relevant to text part of prompt
+            (b) text chunks linked to nearest image point(s) in IMAGE_COLLECTION
+            (c) text chunks linked to the same image point(s) w/ caption injected into prompt
+          Duplicates are removed.
         """
 
-        if query_image_path:
-            # Image-based retrieval: find similar images, then get their associated text chunks
-            image_results = self.retriever.search_images(query_image_path, top_k=top_k_images)
+        system_prompt = (
+            "You are a helpful assistant specializing in Roman Empire history.\n"
+            "You will receive CONTEXT snippets with optional '[Image caption]' lines.\n"
+            "Rules:\n"
+            "- Use CONTEXT as your primary source.\n"
+            "- Treat '[Image caption]' lines as reliable descriptions of the attached image.\n"
+            "- Do NOT mention missing images, inability to see images, or retrieval/meta commentary.\n"
+            # "- Be concise and direct.\n"
+            # "- If the user asks 'What is depicted on this image?', answer in ONE short sentence naming the depicted subject.\n"
+        )
 
-            text_chunk_ids = set()
-            retrieved_images = []
+        # --- A) Text retrieval always happens (textual part of prompt) ---
+        text_results = self.retriever.search_text(question, top_k=top_k_text)
+        text_chunks_by_text: List[str] = [t for (t, _s, _m, _cid) in text_results]
+        text_chunk_ids_by_text: List[int] = [cid for (_t, _s, _m, cid) in text_results]
 
-            for i, (image_metadata, score) in enumerate(image_results):
-                image_id = image_metadata.get("image_id")
+        # Text-only prompt => only return text chunks, no images.
+        if not query_image_path:
+            context_text = "\n\n".join(text_chunks_by_text)
 
-                retrieved_images.append(
-                    RetrievedImage(
-                        id=str(i),
-                        url=image_metadata.get("image_url"),
-                        local_path=image_metadata.get("local_path") or image_metadata.get("image_path"),
-                        caption=None,
-                        page_title=None,
-                        score=float(score)
-                    )
+            if chat_history:
+                history_text = "\n".join([
+                    f"{msg.role}: {msg.content}"
+                    for msg in chat_history[-5:]
+                ])
+                user_prompt = f"CONTEXT:\n{context_text}\n\nQUESTION: {question}\nANSWER:"
+                answer = self.llm.generate(user_prompt, system_prompt=system_prompt)
+            else:
+                user_prompt = f"CONTEXT:\n{context_text}\n\nQUESTION: {question}\nANSWER:"
+                answer = self.llm.generate(user_prompt, system_prompt=system_prompt)
+
+            return answer, RetrievedContext(text_chunks=text_chunks_by_text, images=[])
+
+        # --- B) Image retrieval: nearest images -> linked chunks + captions ---
+        image_results = self.retriever.search_images(query_image_path, top_k=top_k_images)
+
+        image_linked_chunk_ids: List[int] = []
+        retrieved_images: List[RetrievedImage] = []
+
+        # Map chunk_id -> list of captions that appear in that chunk (relationship-level)
+        chunk_captions: dict[int, List[str]] = {}
+
+        # NOTE: captions are relationship-level, so we read them from LINK_COLLECTION.
+        for i, (image_metadata, score) in enumerate(image_results):
+            image_id = image_metadata.get("image_id")
+
+            # Pull the link records for this image to get real stored captions
+            links = []
+            if image_id is not None:
+                links = self.retriever.get_links_by_image_id(int(image_id), limit=200)
+
+            per_image_captions: List[str] = []
+            for link in links:
+                cid = link.get("text_chunk_id")
+                if cid is None:
+                    continue
+
+                image_linked_chunk_ids.append(cid)
+
+                cap = link.get("caption")
+                if isinstance(cap, str):
+                    cap = cap.strip()
+                else:
+                    cap = ""
+
+                if cap:
+                    per_image_captions.append(cap)
+                    if cid not in chunk_captions:
+                        chunk_captions[cid] = []
+                    chunk_captions[cid].append(cap)
+
+            retrieved_images.append(
+                RetrievedImage(
+                    id=str(i),
+                    url=image_metadata.get("image_url"),
+                    local_path=image_metadata.get("image_path") or image_metadata.get("local_path"),
+                    caption=(per_image_captions[0] if per_image_captions else None),
+                    page_title=None,
+                    score=float(score)
                 )
+            )
 
-                if image_id is not None:
-                    for cid in self.retriever.get_text_chunk_ids_by_image_id(image_id):
-                        text_chunk_ids.add(cid)
+        # --- C) Merge + dedupe chunk ids ---
+        merged_chunk_ids: List[int] = []
+        seen_chunk_ids = set()
 
-            text_chunks = []
-            for chunk_id in list(text_chunk_ids)[:top_k_text]:
-                result = self.retriever.get_text_chunk_by_id(chunk_id)
-                if result:
-                    text, _metadata = result
-                    text_chunks.append(text)
+        # Preserve ranking from text retrieval first
+        for cid in text_chunk_ids_by_text:
+            if cid not in seen_chunk_ids:
+                merged_chunk_ids.append(cid)
+                seen_chunk_ids.add(cid)
 
-        else:
-            # Text-based retrieval: find relevant text chunks, then resolve their images via link collection
-            text_results = self.retriever.search_text(question, top_k=top_k_text)
+        # Then add chunks from image links
+        for cid in image_linked_chunk_ids:
+            if cid not in seen_chunk_ids:
+                merged_chunk_ids.append(cid)
+                seen_chunk_ids.add(cid)
 
-            text_chunks = []
-            retrieved_images = []
-            seen = set()
+        # Limit overall context size
+        merged_chunk_ids = merged_chunk_ids[:top_k_text]
 
-            for text, score, metadata, chunk_id in text_results:
-                text_chunks.append(text)
+        merged_text_chunks: List[str] = []
+        # Reuse text chunks we already have
+        text_by_id = {cid: text_chunks_by_text[idx] for idx, cid in enumerate(text_chunk_ids_by_text)}
 
-                chunk_images = self.retriever.get_images_by_text_chunk_id(chunk_id)
+        for cid in merged_chunk_ids:
+            if cid in text_by_id:
+                chunk_text = text_by_id[cid]
+            else:
+                res = self.retriever.get_text_chunk_by_id(cid)
+                if not res:
+                    continue
+                chunk_text, _m = res
 
-                for img_meta in chunk_images:
-                    img_path = img_meta.get("local_path") or img_meta.get("image_path") or img_meta.get("image_url")
-                    if not img_path or img_path in seen:
-                        continue
-                    seen.add(img_path)
-                    retrieved_images.append(
-                        RetrievedImage(
-                            id=str(len(retrieved_images)),
-                            url=img_meta.get("image_url"),
-                            local_path=img_meta.get("local_path") or img_meta.get("image_path"),
-                            caption=img_meta.get("caption"),
-                            page_title=img_meta.get("page_title"),
-                            score=float(score)
-                        )
-                    )
-                    if len(retrieved_images) >= top_k_images:
-                        break
+            # Attach captions near the chunk
+            caps = chunk_captions.get(cid, [])
+            if caps:
+                # Deduplicate captions while preserving order
+                seen_caps = set()
+                uniq_caps = []
+                for c in caps:
+                    if c not in seen_caps:
+                        uniq_caps.append(c)
+                        seen_caps.add(c)
 
-                if len(retrieved_images) >= top_k_images:
-                    break
+                caps_text = "\n".join([f"[Image caption] {c}" for c in uniq_caps])
+                merged_text_chunks.append(f"{caps_text}\n{chunk_text}")
+            else:
+                merged_text_chunks.append(chunk_text)
 
-        # Build context from retrieved chunks
-        context_text = "\n\n".join(text_chunks)
-        
-        # Build prompt with context
-        system_prompt = """You are a helpful assistant specializing in Roman Empire history. 
-Answer questions based on the provided context. Be concise and accurate."""
-        
+        context_text = "\n\n".join(merged_text_chunks)
+
+        # Remove the old separate captions_block and build prompt with just the context_text.
         if chat_history:
             history_text = "\n".join([
                 f"{msg.role}: {msg.content}"
-                for msg in chat_history[-5:]  # Last 5 messages for context
+                for msg in chat_history[-5:]
             ])
-            prompt = f"""{system_prompt}
-
-Previous conversation:
-{history_text}
-
-Context:
-{context_text}
-
-User: {question}
-Assistant:"""
+            user_prompt = f"CONTEXT:\n{context_text}\n\nQUESTION: {question}\nANSWER:"
+            print("PROMPT: ", user_prompt)
+            answer = self.llm.generate(user_prompt, system_prompt=system_prompt)
         else:
-            prompt = f"""{system_prompt}
+            user_prompt = f"CONTEXT:\n{context_text}\n\nQUESTION: {question}\nANSWER:"
+            print("PROMPT: ", user_prompt)
+            answer = self.llm.generate(user_prompt, system_prompt=system_prompt)
 
-Context:
-{context_text}
-
-User: {question}
-Assistant:"""
-        
-        # Generate answer
-        print(prompt)
-        answer = self.llm.generate(prompt)
-        
-        # Build retrieved context
-        context = RetrievedContext(
-            text_chunks=text_chunks,
-            images=retrieved_images
-        )
-        
-        return answer, context
+        return answer, RetrievedContext(text_chunks=merged_text_chunks, images=retrieved_images)
 
 
 # ---- Simple runner to quickly try the pipeline locally ----
@@ -291,7 +361,7 @@ if __name__ == "__main__":
         # "Who was Augustus?"
         # "What is Byzantine Empire?"
         # "What was the fertility rate in Roman Egypt for ages 25–29?"
-        "What depicted on this image?"
+        "What can you say about this picture?"
     )
 
     # image_path = "../tests/data/images/Tunisia-3363_-_Amphitheatre_Spectacle.jpg"
