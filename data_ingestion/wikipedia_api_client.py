@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import time
@@ -6,11 +7,16 @@ from pathlib import Path
 import requests
 
 import wikipedia
+from dotenv import load_dotenv
 from wikipedia import PageError, HTTPTimeoutError, WikipediaException
 
 from logger import get_logger
 
 logger = get_logger(__name__)
+
+load_dotenv()
+
+token = os.getenv("WIKIPEDIA_API_TOKEN")
 
 
 class WikipediaApiClient:
@@ -18,7 +24,9 @@ class WikipediaApiClient:
 
     BASE_URL = "https://en.wikipedia.org"
     BASE_API_URL = "https://en.wikipedia.org/w/api.php"
-    HEADERS = {"User-Agent": "RomanEmpireResearchBot/1.0"}
+    HEADERS = {
+        "User-Agent": "RomanEmpireResearchBot/1.0 (contact: sviatoslav.tkachuk11@gmail.com)",
+    }
     REQUEST_TIMEOUT = 10  # seconds
 
     def __init__(self) -> None:

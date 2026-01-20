@@ -11,6 +11,8 @@ from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScr
 from data_ingestion.wikipedia_api_client import WikipediaApiClient
 from data_ingestion.wikipedia_loader import WikipediaLoader
 from data_ingestion.wikipedia_storage import WikipediaStorage
+from data_ingestion.images_preprocessor import ImagesPreprocessor
+from data_ingestion.wikipedia_image import WikipediaImage
 from logger import get_logger
 from rag.retriever import QdrantRetriever
 
@@ -92,7 +94,12 @@ class WikipediaCollector:
 
         chunks = self.split_articles_into_chunks(filtered_articles)
         logger.info("Total article chunks created: %d", len(chunks))
-        self.loader.download_images([image["src"] for chunk in chunks for image in chunk["images"]])
+        images = [image["image"] for chunk in chunks for image in chunk["images"]]
+        self.loader.download_images(images)
+
+        # Post-process downloaded images: convert SVGs to PNG and remove broken raster files.
+        # Kept here (right after downloads) so local files are ready before we store them in Qdrant.
+        ImagesPreprocessor(images).run_all()
 
         # --- Build text chunk payloads + image dedup maps ---
         # Normalized model:
@@ -120,38 +127,17 @@ class WikipediaCollector:
             chunk_metadata.append(metadata)
 
             for img in chunk.get("images", []) or []:
-                img_url = img.get("src")
-                if not img_url or not isinstance(img_url, str):
-                    continue
+                # img = img["image"]
+                img_url = img["image"].url
                 if "Blank.png" in img_url:
                     continue
 
-                # Convert thumb -> fullsize for better dedup + retrieval
-                if "/thumb/" in img_url:
-                    img_url = self.loader._convert_thumbnail_to_fullsize(img_url)
-
-                # Skip non-direct images
-                if "/wiki/File:" in img_url or "/wiki/Image:" in img_url or "/w/extensions/wikihiero" in img_url:
-                    continue
-
-                # Normalize malformed URLs (duplicate last segment)
-                url_parts = img_url.split("/")
-                if len(url_parts) >= 2:
-                    last_two = url_parts[-2:]
-                    if last_two[0].split("?")[0] == last_two[1].split("?")[0] and last_two[0].split("?")[0]:
-                        img_url = "/".join(url_parts[:-1])
-
-                # Normalize protocol/host
-                if img_url.startswith("//"):
-                    img_url = "https:" + img_url
-                elif img_url.startswith("/"):
-                    img_url = "https://en.wikipedia.org" + img_url
+                # Convert/normalize to a direct absolute URL for better dedup + retrieval
 
                 image_key = img_url
-
                 # Create unique image record if not exists
-                if image_key not in unique_images:
-                    image_title = self.loader._extract_image_filename(img_url)
+                if img_url not in unique_images:
+                    image_title = img["image"].get_filename()
                     local_path = self.storage.image_filepath(image_title)
 
                     unique_images[image_key] = {

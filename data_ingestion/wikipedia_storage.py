@@ -2,9 +2,10 @@ import hashlib
 import os
 from pathlib import Path
 from typing import List
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote
 
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
+from data_ingestion.wikipedia_image import WikipediaImage
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -94,6 +95,4 @@ class WikipediaStorage:
         return safe_name
 
     def _extract_image_filename(self, image_url: str) -> str:
-        path = urlparse(image_url).path
-        return unquote(os.path.basename(path))
-
+        return WikipediaImage(image_url).get_filename()

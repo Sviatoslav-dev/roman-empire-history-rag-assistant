@@ -23,6 +23,10 @@ urllib3==2.6.2
 Werkzeug==3.1.4
 wikipedia==1.4.0
 
+# --- Added for images preprocessing ---
+pillow>=10.0.0
+cairosvg>=2.7.0
+
 # --- Added for LangChain-based pipeline and LLM ---
 langchain==0.3.10
 llama-cpp-python>=0.2.0  # For GGUF model support

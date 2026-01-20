@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 from typing import Optional, List, Dict
-from urllib.parse import unquote
 
 import bs4
 
 from data_ingestion.scraper.base_page_scraper import BasePageScraper
+from data_ingestion.wikipedia_image import WikipediaImage
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -335,9 +335,12 @@ class WikipediaArticleScraper(BasePageScraper):
                     src = self._get_image_url(img)
                     if src:
                         caption = el.select_one("figcaption").text
+                        wiki_image = WikipediaImage(src)
+                        wiki_image.normalize_url()
+                        # if wiki_image.is_license_allowed():
                         current_section["images"].append(
                             {
-                                "src": src,
+                                "image": wiki_image,
                                 "caption": caption
                             }
                         )
@@ -364,9 +367,13 @@ class WikipediaArticleScraper(BasePageScraper):
                     else:
                         caption = el.select_one(".thumbcaption").text.strip()
 
+                    wiki_image = WikipediaImage(src)
+                    wiki_image.normalize_url()
+
+                    # if wiki_image.is_license_allowed():
                     current_section["images"].append(
                         {
-                            "src": src,
+                            "image": wiki_image,
                             "caption": caption
                         }
                     )
@@ -393,9 +400,13 @@ class WikipediaArticleScraper(BasePageScraper):
                     caption_el = gallery_item.select_one(".gallerytext")
                     caption = caption_el.text.strip() if caption_el else ""
 
+                    wiki_image = WikipediaImage(src)
+                    wiki_image.normalize_url()
+
+                    # if wiki_image.is_license_allowed():
                     current_section["images"].append(
                         {
-                            "src": src,
+                            "image": wiki_image,
                             "caption": caption
                         }
                     )
@@ -604,9 +615,12 @@ class WikipediaArticleScraper(BasePageScraper):
                 if not src:
                     continue
 
+                wiki_image = WikipediaImage(src)
+                wiki_image.normalize_url()
+
                 section["images"].append(
                     {
-                        "src": src,
+                        "image": wiki_image,
                         "caption": row.text.strip(),
                     }
                 )
