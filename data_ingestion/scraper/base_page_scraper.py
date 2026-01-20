@@ -12,7 +12,7 @@ class BasePageScraper:
     for concrete scraper implementations.
     """
 
-    def __init__(self, html: str, title: str) -> None:
+    def __init__(self, html: str, title: str, url: str | None = None) -> None:
         """Initialize scraper with page HTML content.
 
         Args:
@@ -21,4 +21,4 @@ class BasePageScraper:
         """
         self.soup: Any = BeautifulSoup(html, "html.parser")
         self.title: str = title
-        self.url: str = self.soup.find("link", rel="canonical")["href"]
+        self.url: str = url if url else self.soup.find("link", rel="canonical")["href"]

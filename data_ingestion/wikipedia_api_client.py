@@ -16,8 +16,6 @@ logger = get_logger(__name__)
 
 load_dotenv()
 
-token = os.getenv("WIKIPEDIA_API_TOKEN")
-
 
 class WikipediaApiClient:
     """Client for fetching raw Wikipedia HTML pages."""
@@ -58,11 +56,6 @@ class WikipediaApiClient:
             logger.error("Error fetching page '%s': %s", title, e)
             return None
 
-        # try:
-        #     html = page.html()
-        # except WikipediaException:
-        #     logger.exception("Error getting HTML for '%s': %s", title, e)
-        #     return None
 
         response = requests.get(page.url, headers=self.HEADERS)
         response.raise_for_status()

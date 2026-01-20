@@ -44,7 +44,7 @@ class WikipediaImage:
         if len(segments) >= 3:
             self.url = f"{base_url}/{'/'.join(segments[:-1])}"
 
-    def normalize_url(self, *, wikipedia_host: str = "https://en.wikipedia.org"):
+    def normalize_url(self, *, wikipedia_host: str = "https://en.wikipedia.org") -> "WikipediaImage":
         """Normalize various Wikipedia image src forms into a direct absolute URL.
 
         Handles:
@@ -74,6 +74,7 @@ class WikipediaImage:
             image_url = wikipedia_host.rstrip("/") + image_url
 
         self.url = image_url
+        return self
 
     def get_filename(self) -> str:
         """Extract the final path segment (decoded) from the image URL."""
@@ -87,13 +88,21 @@ class WikipediaImage:
         text = re.sub(r"\s+", " ", text)
         return text.strip()
 
-    def is_license_allowed(self) -> bool:
+    def is_license_allowed(self, extmetadata: dict | None = None) -> bool:
         """Return True if the image license looks safe-to-use.
 
         We conservatively reject common non-free / fair-use indicators.
         When metadata is missing, we default to allowing.
+
+        Args:
+            extmetadata: Optional Wikimedia `imageinfo.extmetadata` dict. If not provided,
+                metadata is fetched via the Wikipedia API.
         """
-        extmetadata = _wikipedia_client.get_image_license(self.get_filename())
+        if extmetadata is None:
+            extmetadata = _wikipedia_client.get_image_license(self.get_filename())
+
+        if not extmetadata:
+            return True
 
         license_name = (extmetadata.get("LicenseShortName") or {}).get("value", "")
         usage_terms = (extmetadata.get("UsageTerms") or {}).get("value", "")

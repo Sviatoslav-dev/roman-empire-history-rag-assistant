@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List
 from urllib.parse import unquote
 
+from data_ingestion.pg_metadata_store import get_pg_metadata_store
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
 from data_ingestion.wikipedia_image import WikipediaImage
 from logger import get_logger
@@ -17,33 +18,47 @@ class WikipediaStorage:
     """Handles persistence of Wikipedia articles and related assets."""
 
     def get_downloaded_articles(self) -> List[WikipediaArticleScraper]:
-        """
-        Load saved Wikipedia article HTML files from `ARTICLES_DIR`
-        and return scraper instances for them.
+        """Load saved Wikipedia article HTML files referenced by PostgreSQL.
+
+        Reads rows from `ingestion_article` table (title/url/local_path), loads
+        HTML from `local_path` on disk, and returns scraper instances.
 
         Returns:
             A list of `WikipediaArticleScraper` instances constructed from saved
-            HTML files found in the `ARTICLES_DIR` directory.
+            HTML files.
         """
 
-        articles: List[WikipediaArticleScraper] = []
-
-        if not ARTICLES_DIR.exists() or not ARTICLES_DIR.is_dir():
-            logger.error("No valid articles directory provided.")
+        meta = get_pg_metadata_store()
+        if not meta.enabled:
+            logger.error("PostgreSQL metadata store is disabled; cannot load downloaded articles.")
             return []
 
-        for fp in sorted(ARTICLES_DIR.glob("*.html")):
+        articles: List[WikipediaArticleScraper] = []
+        rows = meta.list_articles_with_local_path()
+        if not rows:
+            logger.warning("No ingestion articles with local_path found in PostgreSQL.")
+            return []
+
+        for row in rows:
+            fp = Path(row.local_path)
             if not fp.exists() or not fp.is_file():
-                logger.error("HTML file does not exist: %s", fp)
-                return []
+                logger.warning("Article HTML file missing on disk (title=%s): %s", row.title, fp)
+                continue
 
             try:
                 html = fp.read_text(encoding="utf-8")
-                title = fp.stem  # filename without extension
-                articles.append(WikipediaArticleScraper(html, title))
-            except Exception as e:
-                logger.error("Error reading HTML file %s: %s", fp, e)
-                return []
+            except Exception:
+                logger.exception("Error reading article HTML file (title=%s): %s", row.title, fp)
+                continue
+
+            try:
+                scraper = WikipediaArticleScraper(html, row.title, row.url)
+                # Keep URL best-effort: WikipediaArticleScraper doesn't currently
+                # accept url in __init__, so we attach it if possible.
+                articles.append(scraper)
+            except Exception:
+                logger.exception("Failed to create WikipediaArticleScraper for title=%s", row.title)
+                continue
 
         return articles
 

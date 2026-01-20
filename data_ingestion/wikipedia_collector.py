@@ -9,10 +9,10 @@ from dotenv import load_dotenv
 
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
 from data_ingestion.wikipedia_api_client import WikipediaApiClient
+from data_ingestion.wikipedia_article_filter import WikipediaArticleFilter
 from data_ingestion.wikipedia_loader import WikipediaLoader
 from data_ingestion.wikipedia_storage import WikipediaStorage
 from data_ingestion.images_preprocessor import ImagesPreprocessor
-from data_ingestion.wikipedia_image import WikipediaImage
 from logger import get_logger
 from rag.retriever import QdrantRetriever
 
@@ -25,12 +25,12 @@ logger = get_logger(__name__)
 ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
 IMAGES_DIR = Path(os.getenv("IMAGES_DIR", "./data/images"))
 
+_article_filter = WikipediaArticleFilter()
+
 
 class WikipediaCollector:
     """High-level orchestration of Wikipedia article collection workflow."""
 
-    MIN_ARTICLE_LENGTH = 2000  # Minimum number of characters in the articles
-    MIN_ARTICLE_CITATIONS_NUMBER = 3 # Minimum number of citations in the articles
 
     def __init__(self, wikipedia_loader: WikipediaLoader, wikipedia_storage: WikipediaStorage) -> None:
         self.loader = wikipedia_loader
@@ -39,27 +39,6 @@ class WikipediaCollector:
         self.retriever = QdrantRetriever()
 
 
-    def filter_articles(self, articles: List[WikipediaArticleScraper]) -> List[WikipediaArticleScraper]:
-        """Filter article scrapers using quality criteria.
-
-        Args:
-            articles: List of WikipediaArticleScraper instances to evaluate.
-
-        Returns:
-            A list of scrapers that passed the quality filters.
-        """
-        filtered: List[WikipediaArticleScraper] = []
-
-        for article in articles:
-            try:
-                if article.passes_quality_filters(
-                        self.MIN_ARTICLE_LENGTH,
-                        self.MIN_ARTICLE_CITATIONS_NUMBER,
-                ):
-                    filtered.append(article)
-            except Exception as e:
-                logger.error("Filter error for %s: %s", article.title, e)
-        return filtered
 
     def collect_articles(self, categories_file: str) -> List[WikipediaArticleScraper]:
         """Load category names from a file, download articles, and filter them.
@@ -72,21 +51,21 @@ class WikipediaCollector:
         """
         categories = self.loader.load_categories(categories_file)
 
-        article_titles = self.loader.get_all_articles_from_categories(categories)
+        article_urls = self.loader.get_all_articles_from_categories(categories)
 
         if categories:
-            logger.info("Found %d articles in categories %s", len(article_titles), categories)
+            logger.info("Found %d articles in categories %s", len(article_urls), categories)
         else:
             logger.warning("No valid categories provided in %s.", categories_file)
 
-        if not article_titles:
+        if not article_urls:
             logger.warning("No article titles discovered from categories; aborting fetch.")
             return []
 
-        self.loader.fetch_pages_by_titles(article_titles)
+        self.loader.fetch_pages_by_titles(article_urls)
 
         downloaded_articles = self.storage.get_downloaded_articles()
-        filtered_articles = self.filter_articles(downloaded_articles)
+        filtered_articles = _article_filter.filter_articles(downloaded_articles)
 
         failed = [r for r in downloaded_articles if r not in filtered_articles]
         logger.info("Articles scanned: %d; passed: %d; failed: %d", len(downloaded_articles), len(filtered_articles), len(failed))
