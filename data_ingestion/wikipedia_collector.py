@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict
-from typing import List
+from typing import Dict, List
 
 from dotenv import load_dotenv
 
+from data_ingestion.chunk_models import ArticleChunk
+from data_ingestion.images_preprocessor import ImagesPreprocessor
 from data_ingestion.pg_metadata_store import get_pg_metadata_store
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
 from data_ingestion.wikipedia_api_client import WikipediaApiClient
 from data_ingestion.wikipedia_article_filter import WikipediaArticleFilter
 from data_ingestion.wikipedia_loader import WikipediaLoader
 from data_ingestion.wikipedia_storage import WikipediaStorage
-from data_ingestion.images_preprocessor import ImagesPreprocessor
 from logger import get_logger
 from rag.retriever import QdrantRetriever
 
@@ -75,7 +75,9 @@ class WikipediaCollector:
 
         chunks = self.split_articles_into_chunks(filtered_articles)
         logger.info("Total article chunks created: %d", len(chunks))
-        images = [image["image"] for chunk in chunks for image in chunk["images"]]
+
+        # Collect image objects for download
+        images = [im.image for chunk in chunks for im in chunk.images]
         self.loader.download_images(images)
 
         chunks = _article_filter.filter_chunk_images(chunks)
@@ -89,7 +91,7 @@ class WikipediaCollector:
         # - TEXT points contain ONLY text/section/page metadata (no image urls / local paths)
         # - IMAGE points contain ONLY unique image metadata + embedding
         # - LINK points contain the many-to-many relations + per-chunk caption/section context
-        chunk_texts = [chunk["text"] for chunk in chunks]
+        chunk_texts = [chunk.text for chunk in chunks]
         chunk_metadata: List[Dict] = []
 
         unique_images: Dict[str, Dict] = {}
@@ -101,27 +103,21 @@ class WikipediaCollector:
 
         for chunk_id, chunk in enumerate(chunks):
             metadata = {
-                "page_title": chunk["page_title"],
-                "page_url": chunk["page_url"],
-                "section_title": chunk["section_title"],
-                "section_path": chunk["section_path"],
-                "section_level": chunk["section_level"],
+                "page_title": chunk.page_title,
+                "page_url": chunk.page_url,
+                "section_title": chunk.section_title,
+                "section_path": chunk.section_path,
+                "section_level": chunk.section_level,
             }
             chunk_metadata.append(metadata)
 
-            for img in chunk.get("images", []) or []:
-                # img = img["image"]
-                img_url = img["image"].url
+            for mention in chunk.images:
+                img_url = mention.image.url
                 if "Blank.png" in img_url:
                     continue
 
-                # Convert/normalize to a direct absolute URL for better dedup + retrieval
-
                 image_key = img_url
-                # Create unique image record if not exists
                 if img_url not in unique_images:
-                    # image_title = img["image"].get_filename()
-                    # local_path = self.storage.image_filepath(image_title)
                     local_path = _meta.get_image_by_url(img_url).local_path
 
                     unique_images[image_key] = {
@@ -132,18 +128,18 @@ class WikipediaCollector:
                     next_image_id += 1
 
                 image_id = unique_images[image_key]["image_id"]
-                caption = (img.get("caption") or "").strip()
+                caption = (mention.caption or "").strip()
 
                 links.append(
                     {
                         "text_chunk_id": chunk_id,
                         "image_id": image_id,
                         "caption": caption,
-                        "page_title": chunk["page_title"],
-                        "page_url": chunk["page_url"],
-                        "section_title": chunk.get("section_title"),
-                        "section_path": chunk.get("section_path"),
-                        "section_level": chunk.get("section_level"),
+                        "page_title": chunk.page_title,
+                        "page_url": chunk.page_url,
+                        "section_title": chunk.section_title,
+                        "section_path": chunk.section_path,
+                        "section_level": chunk.section_level,
                     }
                 )
 
@@ -172,7 +168,7 @@ class WikipediaCollector:
         logger.info(
             "Unique images to store: %d (from %d total image mentions)",
             len(image_paths),
-            sum(len(chunk.get("images", []) or []) for chunk in chunks),
+            sum(len(chunk.images) for chunk in chunks),
         )
 
         # Store images in batches
@@ -198,21 +194,10 @@ class WikipediaCollector:
         return filtered_articles
 
 
-    def split_articles_into_chunks(self, articles: List[WikipediaArticleScraper]) -> List[Dict]:
-        chunks = []
+    def split_articles_into_chunks(self, articles: List[WikipediaArticleScraper]) -> List[ArticleChunk]:
+        chunks: List[ArticleChunk] = []
         for article in articles:
-            sections = article.split_by_sections()
-            for section in sections:
-                chunk = {
-                    "page_title": article.title,
-                    "page_url": article.url,
-                    "section_title": section.get("title"),
-                    "section_path": section.get("title_path"),
-                    "section_level": section.get("level"),
-                    "text": section.get("text"),
-                    "images": section.get("images", []),
-                }
-                chunks.append(chunk)
+            chunks.extend(article.split_by_chunks(2000))
         return chunks
 
 

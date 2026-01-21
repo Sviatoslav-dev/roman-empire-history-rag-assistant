@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from typing import Optional, List, Dict
+from typing import Optional, List
 
 import bs4
 
 from data_ingestion.scraper.base_page_scraper import BasePageScraper
 from data_ingestion.wikipedia_image import WikipediaImage
+from data_ingestion.chunk_models import ArticleChunk, ChunkImageMention
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -152,14 +153,11 @@ class WikipediaArticleScraper(BasePageScraper):
                 elements.append(el)
         return elements
 
-    def split_by_sections(self) -> List[Dict]:
-        """
-        Parse article HTML into a flat list of sections (split on h2–h6) and
-        collect all outgoing links.
+    def split_by_chunks(self, max_text_size: int = 2000) -> List[ArticleChunk]:
+        """Parse article HTML into a flat list of chunks split by headings.
 
-        Each heading defines a section; content until the next heading of the
-        same or higher level is part of that section. This effectively splits
-        the article by the lowest section level in the HTML.
+        Note: storage/vector-db payloads are still dict-based elsewhere in the repo;
+        use `chunk.to_payload()` to get the legacy dict schema.
         """
         # Remove table of contents
         toc = self.soup.find("div", id="toc")
@@ -176,20 +174,18 @@ class WikipediaArticleScraper(BasePageScraper):
         if content_root is None:
             raise Exception("Could not find content root in HTML")
 
-        sections: List[Dict] = []
-
-
+        chunks: List[ArticleChunk] = []
 
         content_elements = self._content_elements(content_root)
 
         heading_stack: List[tuple[int, str]] = []
-        current_section: Optional[Dict] = {
-            "title": "Introduction",
-            "title_path": "Introduction",
-            "level": 1,
-            "text_parts": [],
-            "images": [],
-        }
+        current_chunk: Optional[ArticleChunk] = ArticleChunk(
+            page_title=self.title,
+            page_url=self.url,
+            section_title="Introduction",
+            section_path="Introduction",
+            section_level=1,
+        )
 
         # Iterate over all elements in the content area
         # Use direct children first, then descendants for nested content
@@ -203,7 +199,6 @@ class WikipediaArticleScraper(BasePageScraper):
             if h := el.find(["h2", "h3", "h4", "h5", "h6"]):
                 level = int(h.name[1])
                 title_text = h.get_text(" ", strip=True)
-                # title_text = el.get_text(" ", strip=True)
                 if not title_text:
                     continue
 
@@ -213,184 +208,139 @@ class WikipediaArticleScraper(BasePageScraper):
                 heading_stack.append((level, title_text))
                 title_path = " > ".join(t for _, t in heading_stack)
 
-                # Save previous section if it exists
-                if current_section is not None:
-                    # Finalize previous section
-                    text_parts = current_section.pop("text_parts", [])
-                    current_section["text"] = "\n\n".join(text_parts).strip()
-                    if current_section["text"]:  # Only add non-empty sections
-                        if current_section["title"] not in ("References", "Notes", "See also", "External links", "Citations", "Bibliography", "Sources"):
-                            sections.append(current_section)
-                        else:
-                            print()
+                # Save previous chunk if it exists
+                if current_chunk is not None:
+                    current_chunk.finalize_text()
+                    if not current_chunk.is_empty() and not current_chunk.is_excluded():
+                        chunks.append(current_chunk)
 
-                current_section = {
-                    "title": title_text,
-                    "title_path": title_path,
-                    "level": level,
-                    "text_parts": [],
-                    "images": [],
-                }
+                current_chunk = ArticleChunk(
+                    page_title=self.title,
+                    page_url=self.url,
+                    section_title=title_text,
+                    section_path=title_path,
+                    section_level=level,
+                )
                 continue
 
-            if current_section["title"] in ("References", "Notes", "See also", "External links", "Citations", "Bibliography", "Sources"):
-                current_section = None
+            if current_chunk is None:
+                continue
+
+            if current_chunk.is_excluded():
+                current_chunk = None
                 break
 
-            if el.name == "figure" and not current_section.get("text_parts", None):
-                # Finalize previous section
-                text_parts = current_section.pop("text_parts", [])
-                current_section["text"] = "\n\n".join(text_parts).strip()
-                if current_section["text"]:  # Only add non-empty sections
-                    if current_section["title"] not in ("References", "Notes", "See also", "External links", "Citations", "Bibliography", "Sources"):
-                        sections.append(current_section)
+            # If a section starts with a figure, keep figure in its own chunk
+            if el.name == "figure" and not current_chunk.text_parts:
+                current_chunk.finalize_text()
+                if not current_chunk.is_empty() and not current_chunk.is_excluded():
+                    chunks.append(current_chunk)
 
-                current_section = {
-                    "title": current_section["title"],
-                    "title_path": current_section["title_path"],
-                    "level": current_section["level"],
-                    "text_parts": [],
-                    "images": [],
-                }
+                current_chunk = ArticleChunk(
+                    page_title=current_chunk.page_title,
+                    page_url=current_chunk.page_url,
+                    section_title=current_chunk.section_title,
+                    section_path=current_chunk.section_path,
+                    section_level=current_chunk.section_level,
+                )
 
-
-            # Accumulate content into the current section
-            if current_section is None:
-                # Skip content before the first heading
-                continue
-
-            # Special handling for infobox tables
+            # Tables
             if el.name == "table":
                 classes = el.get("class", [])
                 class_str = " ".join(classes) if classes else ""
                 if "infobox" in class_str.lower():
-                    # Extract structured infobox data
-                    infobox_text = self._extract_infobox_data(el, current_section)
+                    infobox_text = self._extract_infobox_data(el, current_chunk)
                     if infobox_text:
-                        current_section["text_parts"].append(infobox_text)
-                    continue
-                else:
-                    table_json = self._extract_table_generic_json(el, current_section)
-
-                    if table_json:
-                        current_section["text_parts"].append(
-                            json.dumps(table_json, ensure_ascii=False)
-                        )
+                        current_chunk.text_parts.append(infobox_text)
                     continue
 
-            if el.name == "table":
-                table_json = self._extract_table_generic_json(el, current_section)
-
+                table_json = self._extract_table_generic_json(el, current_chunk)
                 if table_json:
-                    current_section["text_parts"].append(
-                        json.dumps(table_json, ensure_ascii=False)
-                    )
+                    current_chunk.text_parts.append(json.dumps(table_json, ensure_ascii=False))
                 continue
 
-
+            # Figures
             if el.name == "figure":
                 img = el.select_one("a img")
                 if img:
                     src = self._get_image_url(img)
                     if src:
-                        caption = el.select_one("figcaption").text
+                        caption_el = el.select_one("figcaption")
+                        caption = caption_el.get_text(" ", strip=True) if caption_el else ""
                         wiki_image = WikipediaImage(src)
                         wiki_image.normalize_url()
-                        # if wiki_image.is_license_allowed():
-                        current_section["images"].append(
-                            {
-                                "image": wiki_image,
-                                "caption": caption
-                            }
-                        )
+                        current_chunk.images.append(ChunkImageMention(image=wiki_image, caption=caption))
                 continue
 
+            # Thumbnails
             if "thumb" in el_classes:
-                tsingle_elements = el.select(".tsingle")
-                for ts in tsingle_elements:
+                for ts in el.select(".tsingle"):
                     img = ts.select_one("a img")
                     if not img:
-                        print("Not image found 3")
                         continue
+
                     src = self._get_image_url(img)
+                    if not src:
+                        continue
 
                     thumbcaption = ts.select_one(".thumbcaption")
-
                     if thumbcaption:
-                        caption = thumbcaption.text.strip()
+                        caption = thumbcaption.get_text(" ", strip=True)
                     else:
-                        caption = el.select_one(".thumbcaption").text.strip()
+                        cap_el = el.select_one(".thumbcaption")
+                        caption = cap_el.get_text(" ", strip=True) if cap_el else ""
 
                     wiki_image = WikipediaImage(src)
                     wiki_image.normalize_url()
-
-                    current_section["images"].append(
-                        {
-                            "image": wiki_image,
-                            "caption": caption
-                        }
-                    )
+                    current_chunk.images.append(ChunkImageMention(image=wiki_image, caption=caption))
                 continue
 
+            # Galleries
             if "gallery" in el_classes:
                 for gallery_item in el.select(".gallerybox"):
                     img = gallery_item.select_one("a img")
-
                     if not img:
-                        print("Not image found 2")
                         continue
 
                     src = self._get_image_url(img)
+                    if not src:
+                        continue
 
                     caption_el = gallery_item.select_one(".gallerytext")
-                    caption = caption_el.text.strip() if caption_el else ""
+                    caption = caption_el.get_text(" ", strip=True) if caption_el else ""
 
                     wiki_image = WikipediaImage(src)
                     wiki_image.normalize_url()
-
-                    # if wiki_image.is_license_allowed():
-                    current_section["images"].append(
-                        {
-                            "image": wiki_image,
-                            "caption": caption
-                        }
-                    )
+                    current_chunk.images.append(ChunkImageMention(image=wiki_image, caption=caption))
                 continue
 
             # Text content
             if el.name in {"p", "ul", "ol", "table"}:
                 text = el.get_text(" ", strip=True)
                 if text:
-                    current_section["text_parts"].append(text)
-                    if self.texts_chars_count(current_section.get("text_parts", [])) > 2000:
-                        text_parts = current_section.pop("text_parts", [])
-                        current_section["text"] = "\n\n".join(text_parts).strip()
-                        if current_section["text"]:  # Only add non-empty sections
-                            if current_section["title"] not in ("References", "Notes", "See also", "External links", "Citations", "Bibliography", "Sources"):
-                                sections.append(current_section)
+                    current_chunk.text_parts.append(text)
 
-                        current_section = {
-                            "title": current_section["title"],
-                            "title_path": current_section["title_path"],
-                            "level": current_section["level"],
-                            "text_parts": [],
-                            "images": [],
-                        }
+                    if current_chunk.chars_count() > max_text_size:
+                        current_chunk.finalize_text()
+                        if not current_chunk.is_empty() and not current_chunk.is_excluded():
+                            chunks.append(current_chunk)
+
+                        current_chunk = ArticleChunk(
+                            page_title=current_chunk.page_title,
+                            page_url=current_chunk.page_url,
+                            section_title=current_chunk.section_title,
+                            section_path=current_chunk.section_path,
+                            section_level=current_chunk.section_level,
+                        )
                         continue
 
 
-        # Finalize last section
-        if current_section is not None:
-            text_parts = current_section.pop("text_parts", [])
-            current_section["text"] = "\n\n".join(text_parts).strip()
-            if current_section["text"]:
-                if current_section["title"] not in ("References", "Notes", "See also", "External links"):
-                    sections.append(current_section)
+        if current_chunk is not None:
+            current_chunk.finalize_text()
+            if not current_chunk.is_empty() and not current_chunk.is_excluded():
+                chunks.append(current_chunk)
 
-        # Filter out empty sections
-        sections = [s for s in sections if s.get("text")]
-
-        return sections
+        return chunks
 
     def _get_image_url(self, img: "bs4.element.Tag") -> Optional[str]:
         src = img.get("src") or img.get("data-src") or img.get("data-file-width") or img.get("href")
@@ -411,7 +361,7 @@ class WikipediaArticleScraper(BasePageScraper):
 
         return src
 
-    def _extract_table_generic_json(self, table, current_section):
+    def _extract_table_generic_json(self, table, current_chunk: ArticleChunk):
         def clean_text(el):
             return " ".join(el.stripped_strings)
 
@@ -489,7 +439,7 @@ class WikipediaArticleScraper(BasePageScraper):
 
         return {
             "table_context": {
-                "section": current_section.get("title"),
+                "section": current_chunk.section_title,
                 "caption": caption,
                 "description": "Structured table extracted from HTML with hierarchical headers",
                 "columns": columns,
@@ -497,7 +447,7 @@ class WikipediaArticleScraper(BasePageScraper):
             }
         }
 
-    def _extract_infobox_data(self, table, section: Dict) -> str:
+    def _extract_infobox_data(self, table, section: ArticleChunk) -> str:
         """
         Extract structured data from a Wikipedia infobox table.
 
@@ -553,11 +503,8 @@ class WikipediaArticleScraper(BasePageScraper):
                 wiki_image = WikipediaImage(src)
                 wiki_image.normalize_url()
 
-                section["images"].append(
-                    {
-                        "image": wiki_image,
-                        "caption": row.text.strip(),
-                    }
+                section.images.append(
+                    ChunkImageMention(image=wiki_image, caption=row.text.strip()),
                 )
 
         # Format as readable text

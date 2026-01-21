@@ -1,4 +1,3 @@
-from copy import deepcopy
 from typing import List
 
 from dotenv import load_dotenv
@@ -7,6 +6,7 @@ from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScr
 from data_ingestion.pg_metadata_store import get_pg_metadata_store
 from data_ingestion.wikipedia_api_client import WikipediaApiClient
 from logger import get_logger
+from data_ingestion.chunk_models import ArticleChunk
 
 load_dotenv()
 
@@ -71,8 +71,7 @@ class WikipediaArticleFilter:
         When metadata is missing, we default to allowing.
 
         Args:
-            extmetadata: Optional Wikimedia `imageinfo.extmetadata` dict. If not provided,
-                metadata is fetched via the Wikipedia API.
+            license: License string (already extracted from metadata store).
         """
 
         tokens = set(license.split())
@@ -112,14 +111,29 @@ class WikipediaArticleFilter:
         return True
 
 
-    def filter_chunk_images(self, chunks):
-        filtered_chunks = deepcopy(chunks)
+    def filter_chunk_images(self, chunks: List[ArticleChunk]) -> List[ArticleChunk]:
+        # Keep the API pure: return new chunks with filtered images.
+        # We avoid deepcopy (dataclasses include non-copyable fields sometimes).
+        filtered: List[ArticleChunk] = []
 
-        for chunk in filtered_chunks:
-            filtered_images = []
-            for image in chunk["images"]:
-                license = _meta.get_image_by_url(image["image"].url).licence
+        for chunk in chunks:
+            kept_images = []
+            for mention in chunk.images:
+                license = _meta.get_image_by_url(mention.image.url).licence
                 if license and self.is_license_allowed(license):
-                    filtered_images.append(image)
-            chunk["images"] = filtered_images
-        return filtered_chunks
+                    kept_images.append(mention)
+
+            filtered.append(
+                ArticleChunk(
+                    page_title=chunk.page_title,
+                    page_url=chunk.page_url,
+                    section_title=chunk.section_title,
+                    section_path=chunk.section_path,
+                    section_level=chunk.section_level,
+                    text_parts=list(chunk.text_parts),
+                    images=kept_images,
+                    text=chunk.text,
+                )
+            )
+
+        return filtered
