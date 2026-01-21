@@ -78,6 +78,7 @@ class WikipediaArticleFilter:
         tokens = set(license.split())
 
         forbidden_triggers: tuple[str, ...] = (
+            # clearly non-free / restricted
             "fair use",
             "fair",
             "non free",
@@ -88,6 +89,16 @@ class WikipediaArticleFilter:
             "no derivatives",
             "nc",
             "nd",
+
+            # ambiguous / not a specific reusable licence label (exclude by default)
+            "attribution",
+            "no restrictions",
+            "copyrighted free use",
+
+            # licences/labels that require extra obligations or are unclear for images (exclude by default)
+            "gfdl",
+            "lgpl",
+            "fal",
         )
 
         for trigger in forbidden_triggers:

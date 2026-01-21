@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
 
 from dotenv import load_dotenv
 
 from data_ingestion.pg_metadata_store import get_pg_metadata_store
-from data_ingestion.wikipedia_image import WikipediaImage
 from logger import get_logger
 import cairosvg
 
@@ -28,13 +26,6 @@ class ImagesPreprocessor:
     - SVG conversion requires the optional dependency `cairosvg`.
     - Raster validation uses Pillow (`PIL`).
     """
-
-
-    # def _iter_files(self) -> Iterable[Path]:
-    #     if not self.images_dir.exists():
-    #         logger.warning("Images directory does not exist: %s", self.images_dir)
-    #         return []
-    #     return (p for p in self.images_dir.rglob("*") if p.is_file())
 
     def convert_svgs_to_png(self, *, remove_original: bool = False) -> int:
         """Convert downloaded SVG images (tracked in Postgres) to PNG.
@@ -98,45 +89,3 @@ class ImagesPreprocessor:
                     pass
 
         return converted
-
-    # def remove_broken_raster_images(self) -> int:
-    #     """Detect and remove broken raster images via Pillow.
-    #
-    #     Returns:
-    #         Number of removed files.
-    #     """
-    #     try:
-    #         from PIL import Image  # type: ignore
-    #     except Exception as e:
-    #         logger.warning(
-    #             "Raster validation skipped (Pillow not installed). Install pillow to enable it. Error: %s",
-    #             e,
-    #         )
-    #         return 0
-    #
-    #     removed = 0
-    #     raster_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff"}
-    #
-    #     result = []
-    #     for image in self.images:
-    #         if image.local_path.suffix.lower() not in raster_exts:
-    #             continue
-    #
-    #         try:
-    #             # verify() is fast and catches truncation/corruption, but doesn't decode pixels.
-    #             with Image.open(image.local_path) as img:
-    #                 img.verify()
-    #
-    #             # Extra safety for some edge cases: reopen and force basic load.
-    #             with Image.open(image.local_path) as img:
-    #                 img.load()
-    #
-    #         except Exception as e:
-    #             logger.warning("Broken image detected, removing %s: %s", p, e)
-    #             try:
-    #                 image.local_path.unlink()
-    #                 removed += 1
-    #             except Exception as unlink_err:
-    #                 logger.error("Failed to remove broken image %s: %s", p, unlink_err)
-    #
-    #     return removed
