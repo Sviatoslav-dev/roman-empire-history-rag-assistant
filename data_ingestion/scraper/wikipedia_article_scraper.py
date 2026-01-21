@@ -45,7 +45,7 @@ class WikipediaArticleScraper(BasePageScraper):
         """
         # Length check: use visible text inside content area
         visible_text = self._get_visible_text()
-        if len(visible_text) <= min_article_length:
+        if len(visible_text) < min_article_length:
             logger.info("Article %s failed filter: %s", self.title, f"too_short (length={len(visible_text)})")
             return False
 
