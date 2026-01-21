@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dotenv import load_dotenv
+
 """PostgreSQL metadata store for ingestion.
 
 This module stores *intermediate ingestion metadata* (what we downloaded, where we saved it,
@@ -27,7 +29,7 @@ from logger import get_logger
 
 logger = get_logger(__name__)
 
-
+load_dotenv()
 DEFAULT_DSN = os.getenv("POSTGRES_DSN")
 
 
@@ -46,12 +48,28 @@ class IngestionArticleRow:
     local_path: str
 
 
+@dataclass(frozen=True)
+class IngestionImageRow:
+    url: str
+    local_path: str
+    extension: str | None
+
+
+@dataclass(frozen=True)
+class IngestionImageRowWithMetadata:
+    url: str
+    licence: str | None
+    local_path: str | None
+    filename: str | None
+    extension: str | None
+
+
 class PgMetadataStore:
     def __init__(
         self,
         dsn: str | None = None,
         *,
-        enabled: bool | None = None,
+        enabled: bool | None = True,
     ) -> None:
         self._dsn = dsn or DEFAULT_DSN
         if enabled is None:
@@ -311,6 +329,81 @@ class PgMetadataStore:
         except Exception:
             logger.exception("Failed to fetch article quality from PostgreSQL: %s", title)
             return None
+
+    def get_image_by_url(self, url: str) -> IngestionImageRowWithMetadata | None:
+        """Fetch an image record from `ingestion_image` by URL."""
+        if not self._enabled:
+            return None
+
+        sql = SQL(
+            """
+        select url, licence, local_path, filename, extension
+        from ingestion_image
+        where url = %s
+        limit 1
+        """
+        )
+
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (url,))
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+
+                    return IngestionImageRowWithMetadata(
+                        url=(row.get("url") or url).strip(),
+                        licence=((row.get("licence") or "").strip() or None),
+                        local_path=((row.get("local_path") or "").strip() or None),
+                        filename=((row.get("filename") or "").strip() or None),
+                        extension=((row.get("extension") or "").strip() or None),
+                    )
+        except Exception:
+            logger.exception("Failed to fetch image metadata from PostgreSQL: %s", url)
+            return None
+
+    def list_svg_images(self) -> list[IngestionImageRow]:
+        """Return image rows that represent downloaded SVG files on disk."""
+        if not self._enabled:
+            return []
+
+        sql = SQL(
+            """
+        select url, local_path, extension
+        from ingestion_image
+        where local_path is not null
+          and local_path <> ''
+          and (
+            lower(coalesce(extension, '')) = '.svg'
+            or lower(right(local_path, 4)) = '.svg'
+          )
+        order by url asc
+        """
+        )
+
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    rows = cur.fetchall() or []
+                    result: list[IngestionImageRow] = []
+                    for r in rows:
+                        url = (r.get("url") or "").strip()
+                        local_path = (r.get("local_path") or "").strip()
+                        if not url or not local_path:
+                            continue
+                        result.append(
+                            IngestionImageRow(
+                                url=url,
+                                local_path=local_path,
+                                extension=(r.get("extension") or None),
+                            )
+                        )
+                    return result
+        except Exception:
+            logger.exception("Failed to list SVG images from PostgreSQL")
+            return []
 
 
 # Lazy singleton used by ingestion code.

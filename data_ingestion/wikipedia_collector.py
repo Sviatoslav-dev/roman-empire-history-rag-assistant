@@ -7,6 +7,7 @@ from typing import List
 
 from dotenv import load_dotenv
 
+from data_ingestion.pg_metadata_store import get_pg_metadata_store
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
 from data_ingestion.wikipedia_api_client import WikipediaApiClient
 from data_ingestion.wikipedia_article_filter import WikipediaArticleFilter
@@ -21,6 +22,7 @@ _wikipedia_client = WikipediaApiClient()
 load_dotenv()
 
 logger = get_logger(__name__)
+_meta = get_pg_metadata_store()
 
 ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
 IMAGES_DIR = Path(os.getenv("IMAGES_DIR", "./data/images"))
@@ -76,9 +78,11 @@ class WikipediaCollector:
         images = [image["image"] for chunk in chunks for image in chunk["images"]]
         self.loader.download_images(images)
 
+        chunks = _article_filter.filter_chunk_images(chunks)
+
         # Post-process downloaded images: convert SVGs to PNG and remove broken raster files.
         # Kept here (right after downloads) so local files are ready before we store them in Qdrant.
-        ImagesPreprocessor(images).run_all()
+        ImagesPreprocessor().convert_svgs_to_png()
 
         # --- Build text chunk payloads + image dedup maps ---
         # Normalized model:
@@ -116,8 +120,9 @@ class WikipediaCollector:
                 image_key = img_url
                 # Create unique image record if not exists
                 if img_url not in unique_images:
-                    image_title = img["image"].get_filename()
-                    local_path = self.storage.image_filepath(image_title)
+                    # image_title = img["image"].get_filename()
+                    # local_path = self.storage.image_filepath(image_title)
+                    local_path = _meta.get_image_by_url(img_url).local_path
 
                     unique_images[image_key] = {
                         "image_id": next_image_id,
