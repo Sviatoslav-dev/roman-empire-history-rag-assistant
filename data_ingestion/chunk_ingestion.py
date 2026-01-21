@@ -25,13 +25,13 @@ class ChunkIngestionPipeline:
 
     chunks: List[ArticleChunk] = field(default_factory=list)
 
-    IMAGE_ID_START: int = 1_000_000
+    MAX_CHUNK_SIZE: int = 2000  # Max characters per chunk
 
     def split_articles_into_chunks(self, articles: List[WikipediaArticleScraper]) -> List[ArticleChunk]:
         """Split scraper objects into `ArticleChunk` instances."""
         chunks: List[ArticleChunk] = []
         for article in articles:
-            chunks.extend(article.split_by_chunks(2000))
+            chunks.extend(article.split_by_chunks(self.MAX_CHUNK_SIZE))
         self.chunks = chunks
         logger.info("Total article chunks created: %d", len(chunks))
         return chunks
@@ -98,7 +98,7 @@ class ChunkIngestionPipeline:
             - Image local_path is read from PostgreSQL metadata store.
         """
         unique_images: Dict[str, Dict] = {}
-        next_image_id = self.IMAGE_ID_START
+        next_image_id = 1_000_000
 
         for chunk in self.chunks:
             for mention in chunk.images:
@@ -180,4 +180,3 @@ class ChunkIngestionPipeline:
                 )
 
         return links
-
