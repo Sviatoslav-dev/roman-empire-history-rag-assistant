@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import time
@@ -14,7 +15,7 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 load_dotenv()
-
+USER_AGENT_EMAIL = os.getenv("USER_AGENT_EMAIL")
 
 class WikipediaApiClient:
     """Client for fetching raw Wikipedia HTML pages."""
@@ -22,7 +23,7 @@ class WikipediaApiClient:
     BASE_URL = "https://en.wikipedia.org"
     BASE_API_URL = "https://en.wikipedia.org/w/api.php"
     HEADERS = {
-        "User-Agent": "RomanEmpireResearchBot/1.0 (contact: sviatoslav.tkachuk11@gmail.com)",
+        "User-Agent": f"RomanEmpireResearchBot/1.0 (contact: {USER_AGENT_EMAIL})",
     }
     REQUEST_TIMEOUT = 10  # seconds
 

@@ -42,7 +42,7 @@ class WikipediaCollector:
         )
 
     def collect_articles(self, categories_file: str) -> List[WikipediaArticleScraper]:
-        """Load category names, download articles, filter them, chunk and ingest into Qdrant."""
+        """Collect, process, and ingest Wikipedia articles discovered from categories."""
         categories = self.loader.load_categories(categories_file)
         article_urls = self.loader.get_all_articles_from_categories(categories)
 
