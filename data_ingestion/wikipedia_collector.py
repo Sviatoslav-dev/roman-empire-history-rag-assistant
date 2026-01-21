@@ -17,7 +17,7 @@ from rag.retriever import QdrantRetriever
 load_dotenv()
 
 logger = get_logger(__name__)
-_meta = get_pg_metadata_store()
+_postgres = get_pg_metadata_store()
 _article_filter = WikipediaArticleFilter()
 
 
@@ -38,7 +38,7 @@ class WikipediaCollector:
         self.chunk_pipeline = ChunkIngestionPipeline(
             loader=self.loader,
             article_filter=_article_filter,
-            metadata_store=_meta,
+            metadata_store=_postgres,
         )
 
     def collect_articles(self, categories_file: str) -> List[WikipediaArticleScraper]:

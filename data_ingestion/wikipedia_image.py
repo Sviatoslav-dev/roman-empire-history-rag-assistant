@@ -71,3 +71,4 @@ class WikipediaImage:
         """Extract the final path segment (decoded) from the image URL."""
         path = urlparse(self.url).path
         return unquote(os.path.basename(path))
+

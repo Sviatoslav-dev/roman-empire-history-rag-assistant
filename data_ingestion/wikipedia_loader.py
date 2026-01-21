@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 
 _wikipedia_client = WikipediaApiClient()
 _storage = WikipediaStorage()
-_meta = get_pg_metadata_store()
+_postgres = get_pg_metadata_store()
 
 ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
 IMAGES_DIR = Path(os.getenv("IMAGES_DIR", "./data/images"))
@@ -58,8 +58,8 @@ class WikipediaLoader:
                 title = None
                 try:
                     title = unquote(url).replace("/wiki/", "")
-                    _meta.upsert_article_title(title)
-                    _meta.update_article_url(title, url)
+                    _postgres.upsert_article_title(title)
+                    _postgres.update_article_url(title, url)
                     articles.add(url)
                 except Exception:
                     logger.exception("Failed to upsert article title into PostgreSQL: %s", title or url)
@@ -94,7 +94,7 @@ class WikipediaLoader:
 
             try:
                 file_path = ARTICLES_DIR / f"{_storage.article_title_to_filename(title)}.html"
-                _meta.update_article_local_path(title, str(file_path))
+                _postgres.update_article_local_path(title, str(file_path))
             except Exception:
                 logger.exception("Failed to update article local_path in PostgreSQL: %s", title)
 
@@ -108,7 +108,7 @@ class WikipediaLoader:
                 is_english_available=article.is_english_article(),
             )
             try:
-                _meta.update_article_quality(title, quality)
+                _postgres.update_article_quality(title, quality)
             except Exception:
                 logger.exception("Failed to persist article quality metrics: %s", article.title)
 
@@ -139,7 +139,7 @@ class WikipediaLoader:
 
             # We key images by URL in Postgres.
             try:
-                _meta.upsert_image_url(image.url)
+                _postgres.upsert_image_url(image.url)
             except Exception:
                 logger.exception("Failed to upsert image URL into PostgreSQL: %s", image.url)
 
@@ -161,7 +161,7 @@ class WikipediaLoader:
                 licence_name = (extmetadata.get("LicenseShortName") or {}).get("value")
 
             try:
-                _meta.update_image_metadata(
+                _postgres.update_image_metadata(
                     url=image.url,
                     local_path=str(filepath),
                     filename=filepath.name,

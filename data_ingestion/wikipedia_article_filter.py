@@ -11,7 +11,7 @@ from data_ingestion.chunk_models import ArticleChunk
 load_dotenv()
 
 logger = get_logger(__name__)
-_meta = get_pg_metadata_store()
+_postges = get_pg_metadata_store()
 _wikipedia_client = WikipediaApiClient()
 
 class WikipediaArticleFilter:
@@ -60,7 +60,7 @@ class WikipediaArticleFilter:
 
         for article in articles:
             try:
-                quality = _meta.get_article_quality(article.title)
+                quality = _postges.get_article_quality(article.title)
 
                 if quality is None:
                     # Backward-compatible fallback: compute from HTML if DB row is incomplete.
@@ -121,7 +121,7 @@ class WikipediaArticleFilter:
         for chunk in chunks:
             kept_images = []
             for mention in chunk.images:
-                meta = _meta.get_image_by_url(mention.image.url)
+                meta = _postges.get_image_by_url(mention.image.url)
                 licence = meta.licence if meta is not None else None
                 # When metadata is missing, default to allowing.
                 if not licence or self.is_license_allowed(licence):

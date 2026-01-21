@@ -28,13 +28,13 @@ class WikipediaStorage:
             HTML files.
         """
 
-        meta = get_pg_metadata_store()
-        if not meta.enabled:
+        postgres = get_pg_metadata_store()
+        if not postgres.enabled:
             logger.error("PostgreSQL metadata store is disabled; cannot load downloaded articles.")
             return []
 
         articles: List[WikipediaArticleScraper] = []
-        rows = meta.list_articles_with_local_path()
+        rows = postgres.list_articles_with_local_path()
         if not rows:
             logger.warning("No ingestion articles with local_path found in PostgreSQL.")
             return []

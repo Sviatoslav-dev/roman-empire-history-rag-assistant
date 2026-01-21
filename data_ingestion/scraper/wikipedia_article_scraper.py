@@ -14,17 +14,7 @@ logger = get_logger(__name__)
 
 
 class WikipediaArticleScraper(BasePageScraper):
-    """Parses and analyzes a single Wikipedia article HTML.
-
-    Main responsibilities:
-    - Validate quality heuristics (length / citations / language / maintenance banners)
-    - Convert article body into a list of `ArticleChunk` objects
-    - Collect embedded image mentions and add lightweight table/infobox context
-
-    Design notes:
-    - Chunk/image objects are typed in ingestion (dataclasses).
-    - Vector DB payloads remain dicts at the storage boundary.
-    """
+    """Parses and analyzes a single Wikipedia article HTML."""
 
     PROBLEM_KEYWORDS = frozenset([
         "disput", "cleanup", "update", "problem", "outdat",
