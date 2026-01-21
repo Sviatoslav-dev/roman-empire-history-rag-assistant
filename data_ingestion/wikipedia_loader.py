@@ -130,7 +130,7 @@ class WikipediaLoader:
             return [line.strip() for line in f if line.strip()]
 
 
-    def download_images(self, images: List[WikipediaImage]):
+    def download_images(self, images: List[WikipediaImage]) -> None:
         """Download images and persist metadata incrementally."""
         for image in tqdm(images, desc="Downloading images"):
             logger.debug("Processing image URL: %s", image.url)
