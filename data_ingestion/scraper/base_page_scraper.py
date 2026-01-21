@@ -21,4 +21,4 @@ class BasePageScraper:
         """
         self.soup: Any = BeautifulSoup(html, "html.parser")
         self.title: str = title
-        self.url: str = url if url else self.soup.find("link", rel="canonical")["href"]
+        self.url: str = url

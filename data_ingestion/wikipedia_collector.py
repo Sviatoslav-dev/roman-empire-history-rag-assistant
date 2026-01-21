@@ -1,58 +1,49 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import Dict, List
+from typing import List
 
 from dotenv import load_dotenv
 
-from data_ingestion.chunk_models import ArticleChunk
-from data_ingestion.images_preprocessor import ImagesPreprocessor
+from data_ingestion.chunk_ingestion import ChunkIngestionPipeline
 from data_ingestion.pg_metadata_store import get_pg_metadata_store
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
-from data_ingestion.wikipedia_api_client import WikipediaApiClient
 from data_ingestion.wikipedia_article_filter import WikipediaArticleFilter
 from data_ingestion.wikipedia_loader import WikipediaLoader
 from data_ingestion.wikipedia_storage import WikipediaStorage
 from logger import get_logger
 from rag.retriever import QdrantRetriever
 
-_wikipedia_client = WikipediaApiClient()
-
 load_dotenv()
 
 logger = get_logger(__name__)
 _meta = get_pg_metadata_store()
-
-ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
-IMAGES_DIR = Path(os.getenv("IMAGES_DIR", "./data/images"))
-
 _article_filter = WikipediaArticleFilter()
 
 
 class WikipediaCollector:
-    """High-level orchestration of Wikipedia article collection workflow."""
+    """High-level orchestration of Wikipedia article collection workflow.
 
+    This class is responsible for fetching and filtering Wikipedia articles.
+
+    Chunk/image processing and payload preparation are delegated to
+    `ChunkIngestionPipeline`.
+    """
 
     def __init__(self, wikipedia_loader: WikipediaLoader, wikipedia_storage: WikipediaStorage) -> None:
         self.loader = wikipedia_loader
         self.storage = wikipedia_storage
-
         self.retriever = QdrantRetriever()
 
-
+        self.chunk_pipeline = ChunkIngestionPipeline(
+            loader=self.loader,
+            article_filter=_article_filter,
+            metadata_store=_meta,
+        )
 
     def collect_articles(self, categories_file: str) -> List[WikipediaArticleScraper]:
-        """Load category names from a file, download articles, and filter them.
-
-        Args:
-            categories_file: Path to newline-delimited category file.
-
-        Returns:
-            A list of WikipediaArticleScraper instances that passed filters.
-        """
+        """Load category names, download articles, filter them, chunk and ingest into Qdrant."""
         categories = self.loader.load_categories(categories_file)
-
         article_urls = self.loader.get_all_articles_from_categories(categories)
 
         if categories:
@@ -70,135 +61,40 @@ class WikipediaCollector:
         filtered_articles = _article_filter.filter_articles(downloaded_articles)
 
         failed = [r for r in downloaded_articles if r not in filtered_articles]
-        logger.info("Articles scanned: %d; passed: %d; failed: %d", len(downloaded_articles), len(filtered_articles), len(failed))
-        # return filtered_articles
+        logger.info(
+            "Articles scanned: %d; passed: %d; failed: %d",
+            len(downloaded_articles),
+            len(filtered_articles),
+            len(failed),
+        )
 
-        chunks = self.split_articles_into_chunks(filtered_articles)
-        logger.info("Total article chunks created: %d", len(chunks))
+        self.chunk_pipeline.split_articles_into_chunks(filtered_articles)
 
-        # Collect image objects for download
-        images = [im.image for chunk in chunks for im in chunk.images]
-        self.loader.download_images(images)
+        # Delegate chunk/image preparation
+        self.chunk_pipeline.download_images()
+        self.chunk_pipeline.postprocess_images()
+        self.chunk_pipeline.filter_images_by_license()
 
-        chunks = _article_filter.filter_chunk_images(chunks)
+        chunk_texts, chunk_metadata = self.chunk_pipeline.prepare_text_collection()
+        unique_images_by_url, image_paths, image_metadata, image_ids = self.chunk_pipeline.prepare_images_collection()
+        links = self.chunk_pipeline.prepare_link_collection(unique_images_by_url)
 
-        # Post-process downloaded images: convert SVGs to PNG and remove broken raster files.
-        # Kept here (right after downloads) so local files are ready before we store them in Qdrant.
-        ImagesPreprocessor().convert_svgs_to_png()
-
-        # --- Build text chunk payloads + image dedup maps ---
-        # Normalized model:
-        # - TEXT points contain ONLY text/section/page metadata (no image urls / local paths)
-        # - IMAGE points contain ONLY unique image metadata + embedding
-        # - LINK points contain the many-to-many relations + per-chunk caption/section context
-        chunk_texts = [chunk.text for chunk in chunks]
-        chunk_metadata: List[Dict] = []
-
-        unique_images: Dict[str, Dict] = {}
-        links: List[Dict] = []
-
-        # We'll assign deterministic ids for images we upsert in this run
-        IMAGE_ID_START = 1_000_000
-        next_image_id = IMAGE_ID_START
-
-        for chunk_id, chunk in enumerate(chunks):
-            metadata = {
-                "page_title": chunk.page_title,
-                "page_url": chunk.page_url,
-                "section_title": chunk.section_title,
-                "section_path": chunk.section_path,
-                "section_level": chunk.section_level,
-            }
-            chunk_metadata.append(metadata)
-
-            for mention in chunk.images:
-                img_url = mention.image.url
-                if "Blank.png" in img_url:
-                    continue
-
-                image_key = img_url
-                if img_url not in unique_images:
-                    local_path = _meta.get_image_by_url(img_url).local_path
-
-                    unique_images[image_key] = {
-                        "image_id": next_image_id,
-                        "image_url": img_url,
-                        "local_path": str(local_path),
-                    }
-                    next_image_id += 1
-
-                image_id = unique_images[image_key]["image_id"]
-                caption = (mention.caption or "").strip()
-
-                links.append(
-                    {
-                        "text_chunk_id": chunk_id,
-                        "image_id": image_id,
-                        "caption": caption,
-                        "page_title": chunk.page_title,
-                        "page_url": chunk.page_url,
-                        "section_title": chunk.section_title,
-                        "section_path": chunk.section_path,
-                        "section_level": chunk.section_level,
-                    }
-                )
-
-        # Add text chunks to vector DB
+        # Upsert text chunks
         self.retriever.add_text_chunks(
             chunk_texts,
             chunk_metadata,
-            ids=list(range(len(chunks))),
+            ids=list(range(len(chunk_texts))),
         )
 
-        # --- Store unique images in image collection ---
-        image_paths: List[str] = []
-        image_metadata: List[Dict] = []
-        image_ids: List[int] = []
+        # Upsert images
+        if image_paths:
+            self.retriever.add_images(image_paths, image_metadata, ids=image_ids)
 
-        for rec in unique_images.values():
-            image_ids.append(rec["image_id"])
-            image_paths.append(rec["local_path"])
-            image_metadata.append(
-                {
-                    "image_url": rec["image_url"],
-                    "local_path": rec["local_path"],
-                }
-            )
-
-        logger.info(
-            "Unique images to store: %d (from %d total image mentions)",
-            len(image_paths),
-            sum(len(chunk.images) for chunk in chunks),
-        )
-
-        # Store images in batches
-        BATCH_SIZE = 500
-        for i in range(0, len(image_paths), BATCH_SIZE):
-            batch_paths = image_paths[i:i + BATCH_SIZE]
-            batch_metadata = image_metadata[i:i + BATCH_SIZE]
-            batch_ids = image_ids[i:i + BATCH_SIZE]
-
-            self.retriever.add_images(
-                batch_paths,
-                batch_metadata,
-                ids=batch_ids,
-            )
-
-        # --- Store links in link collection ---
-        # Make link ids stable for this ingestion run
-        self.retriever.add_chunk_image_links(
-            links,
-            ids=list(range(0, len(links))),
-        )
+        # Upsert links
+        if links:
+            self.retriever.add_chunk_image_links(links, ids=list(range(0, len(links))))
 
         return filtered_articles
-
-
-    def split_articles_into_chunks(self, articles: List[WikipediaArticleScraper]) -> List[ArticleChunk]:
-        chunks: List[ArticleChunk] = []
-        for article in articles:
-            chunks.extend(article.split_by_chunks(2000))
-        return chunks
 
 
 if __name__ == "__main__":
