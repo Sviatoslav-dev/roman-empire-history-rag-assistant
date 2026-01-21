@@ -112,7 +112,7 @@ class WikipediaApiClient:
         response = requests.get(image_url, headers=self.HEADERS, timeout=30)
 
         if response.status_code == 429:
-            retry_after = response.headers.get("Retry-After")
+            retry_after = response.headers.get("Retry-After", "60")
             time.sleep(int(retry_after))
             response = requests.get(image_url, headers=self.HEADERS, timeout=30)
             response.raise_for_status()
