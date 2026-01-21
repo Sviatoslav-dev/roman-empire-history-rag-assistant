@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Optional, List
 
-import bs4
+from bs4 import Tag
 
 from data_ingestion.scraper.base_page_scraper import BasePageScraper
 from data_ingestion.wikipedia_image import WikipediaImage
@@ -14,7 +14,17 @@ logger = get_logger(__name__)
 
 
 class WikipediaArticleScraper(BasePageScraper):
-    """Parses and analyzes a single Wikipedia article HTML."""
+    """Parses and analyzes a single Wikipedia article HTML.
+
+    Main responsibilities:
+    - Validate quality heuristics (length / citations / language / maintenance banners)
+    - Convert article body into a list of `ArticleChunk` objects
+    - Collect embedded image mentions and add lightweight table/infobox context
+
+    Design notes:
+    - Chunk/image objects are typed in ingestion (dataclasses).
+    - Vector DB payloads remain dicts at the storage boundary.
+    """
 
     PROBLEM_KEYWORDS = frozenset([
         "disput", "cleanup", "update", "problem", "outdat",
@@ -154,12 +164,67 @@ class WikipediaArticleScraper(BasePageScraper):
         return elements
 
     def split_by_chunks(self, max_text_size: int = 2000) -> List[ArticleChunk]:
-        """Parse article HTML into a flat list of chunks split by headings.
+        """Split the article into heading-based chunks.
 
-        Note: storage/vector-db payloads are still dict-based elsewhere in the repo;
-        use `chunk.to_payload()` to get the legacy dict schema.
+        A chunk roughly corresponds to a section (h2–h6) and is further split when its
+        accumulated text exceeds `max_text_size`.
+
+        Args:
+            max_text_size: Maximum combined size of `text_parts` (characters). If exceeded,
+                the current chunk is finalized/emitted and a continuation chunk is started
+                with the same section metadata.
+
+        Returns:
+            A list of `ArticleChunk` objects.
         """
-        # Remove table of contents
+        self._cleanup_for_chunking()
+
+        content_root = self._get_content_root()
+        content_elements = self._content_elements(content_root)
+
+        chunks: List[ArticleChunk] = []
+        heading_stack: List[tuple[int, str]] = []
+
+        current_chunk: Optional[ArticleChunk] = self._new_chunk(
+            section_title="Introduction",
+            section_path="Introduction",
+            section_level=1,
+        )
+
+        for el in content_elements:
+            if not getattr(el, "name", None):
+                continue
+
+            # A) Section heading
+            if (next_chunk := self._maybe_start_new_section(el, heading_stack, current_chunk, chunks)) is not None:
+                current_chunk = next_chunk
+                continue
+
+            if current_chunk is None:
+                continue
+
+            # stop once we hit excluded tail sections
+            if current_chunk.is_excluded():
+                logger.debug(
+                    "Stopping chunking at excluded section '%s' for article '%s'",
+                    current_chunk.section_title,
+                    self.title,
+                )
+                break
+
+            current_chunk = self._handle_content_element(el, current_chunk, chunks, max_text_size=max_text_size)
+
+        self._finalize_and_append(current_chunk, chunks)
+
+        logger.info("Chunked '%s' into %d chunks", self.title, len(chunks))
+        return chunks
+
+    # -------------------------
+    # Helpers (chunking)
+    # -------------------------
+
+    def _cleanup_for_chunking(self) -> None:
+        """Remove noisy navigation/boilerplate blocks that should not be embedded."""
         toc = self.soup.find("div", id="toc")
         if toc:
             toc.decompose()
@@ -170,179 +235,199 @@ class WikipediaArticleScraper(BasePageScraper):
         for tag in self.soup.find_all(class_="side-box"):
             tag.decompose()
 
+    def _get_content_root(self) -> Tag:
+        """Return the root element that contains the visible article content."""
         content_root = self.soup.find("div", class_="mw-content-ltr")
         if content_root is None:
             raise Exception("Could not find content root in HTML")
+        return content_root
 
-        chunks: List[ArticleChunk] = []
-
-        content_elements = self._content_elements(content_root)
-
-        heading_stack: List[tuple[int, str]] = []
-        current_chunk: Optional[ArticleChunk] = ArticleChunk(
+    def _new_chunk(self, *, section_title: str, section_path: str, section_level: int) -> ArticleChunk:
+        """Factory for a new chunk keeping page-level metadata consistent."""
+        return ArticleChunk(
             page_title=self.title,
             page_url=self.url,
-            section_title="Introduction",
-            section_path="Introduction",
-            section_level=1,
+            section_title=section_title,
+            section_path=section_path,
+            section_level=section_level,
         )
 
-        # Iterate over all elements in the content area
-        # Use direct children first, then descendants for nested content
-        for el in content_elements:
-            el_classes = " ".join(el.get("class", [])).lower()
+    def _finalize_and_append(self, chunk: Optional[ArticleChunk], chunks: List[ArticleChunk]) -> None:
+        """Finalize a chunk and append it if it is non-empty and not excluded."""
+        if chunk is None:
+            return
 
-            if not getattr(el, "name", None):
+        chunk.finalize_text()
+        if chunk.is_empty() or chunk.is_excluded():
+            return
+
+        chunks.append(chunk)
+
+    def _maybe_start_new_section(
+        self,
+        el: Tag,
+        heading_stack: List[tuple[int, str]],
+        current_chunk: Optional[ArticleChunk],
+        chunks: List[ArticleChunk],
+    ) -> Optional[ArticleChunk]:
+        """If `el` contains a heading, close current chunk and start a new one."""
+        h = el.find(["h2", "h3", "h4", "h5", "h6"])
+        if not h:
+            return None
+
+        level = int(h.name[1])
+        title_text = " ".join(h.get_text().split())
+        if not title_text:
+            return None
+
+        # Maintain hierarchy stack
+        while heading_stack and heading_stack[-1][0] >= level:
+            heading_stack.pop()
+        heading_stack.append((level, title_text))
+        title_path = " > ".join(t for _, t in heading_stack)
+
+        # flush previous
+        self._finalize_and_append(current_chunk, chunks)
+
+        logger.debug("Start section '%s' (level=%d) for '%s'", title_text, level, self.title)
+
+        return self._new_chunk(section_title=title_text, section_path=title_path, section_level=level)
+
+    def _handle_content_element(
+        self,
+        el: Tag,
+        current_chunk: ArticleChunk,
+        chunks: List[ArticleChunk],
+        *,
+        max_text_size: int,
+    ) -> ArticleChunk:
+        """Handle one content element and update/return the current chunk."""
+        classes_attr = el.get("class")
+        el_classes = " ".join(classes_attr) if isinstance(classes_attr, list) else (classes_attr or "")
+        el_classes = el_classes.lower()
+
+        # Split chunks by figure elements
+        if el.name == "figure" and not current_chunk.text_parts:
+            self._finalize_and_append(current_chunk, chunks)
+            current_chunk = self._new_chunk(
+                section_title=current_chunk.section_title,
+                section_path=current_chunk.section_path,
+                section_level=current_chunk.section_level,
+            )
+
+        # Tables
+        if el.name == "table":
+            self._handle_table(el, current_chunk)
+            return current_chunk
+
+        # Figure images
+        if el.name == "figure":
+            self._handle_figure(el, current_chunk)
+            return current_chunk
+
+        # Thumbnails
+        if "thumb" in el_classes:
+            self._handle_thumbnails(el, current_chunk)
+            return current_chunk
+
+        # Galleries
+        if "gallery" in el_classes:
+            self._handle_gallery(el, current_chunk)
+            return current_chunk
+
+        # Text content
+        if el.name in {"p", "ul", "ol", "table"}:
+            text = " ".join(el.get_text().split())
+            if text:
+                current_chunk.text_parts.append(text)
+
+                if current_chunk.chars_count() > max_text_size:
+                    self._finalize_and_append(current_chunk, chunks)
+                    current_chunk = self._new_chunk(
+                        section_title=current_chunk.section_title,
+                        section_path=current_chunk.section_path,
+                        section_level=current_chunk.section_level,
+                    )
+
+        return current_chunk
+
+    def _handle_table(self, el: Tag, current_chunk: ArticleChunk) -> None:
+        """Extract infobox or generic table JSON and append it into the chunk text."""
+        classes_attr = el.get("class")
+        class_str = " ".join(classes_attr) if isinstance(classes_attr, list) else (classes_attr or "")
+
+        if "infobox" in class_str.lower():
+            infobox_text = self._extract_infobox_data(el, current_chunk)
+            if infobox_text:
+                current_chunk.text_parts.append(infobox_text)
+                logger.debug("Infobox extracted for '%s' / section '%s'", self.title, current_chunk.section_path)
+            return
+
+        table_json = self._extract_table_generic_json(el, current_chunk)
+        if table_json:
+            current_chunk.text_parts.append(json.dumps(table_json, ensure_ascii=False))
+
+    def _handle_figure(self, el: Tag, current_chunk: ArticleChunk) -> None:
+        """Extract a <figure> image and caption and attach it to the chunk."""
+        img: Optional[Tag] = el.select_one("a img")
+        if not img:
+            return
+
+        src = self._get_image_url(img)
+        if not src:
+            return
+
+        caption_el: Optional[Tag] = el.select_one("figcaption")
+        caption = " ".join(caption_el.get_text().split()) if caption_el else ""
+
+        wiki_image = WikipediaImage(src)
+        wiki_image.normalize_url()
+        current_chunk.images.append(ChunkImageMention(image=wiki_image, caption=caption))
+
+        logger.debug("Figure image captured: %s (caption_len=%d)", wiki_image.url, len(caption))
+
+    def _handle_thumbnails(self, el: Tag, current_chunk: ArticleChunk) -> None:
+        """Extract thumbnail images in a 'thumb' container."""
+        for ts in el.select(".tsingle"):
+            img: Optional[Tag] = ts.select_one("a img")
+            if not img:
                 continue
 
-            # New section starts at h2–h6
-            if h := el.find(["h2", "h3", "h4", "h5", "h6"]):
-                level = int(h.name[1])
-                title_text = h.get_text(" ", strip=True)
-                if not title_text:
-                    continue
-
-                # Update heading stack to maintain hierarchy
-                while heading_stack and heading_stack[-1][0] >= level:
-                    heading_stack.pop()
-                heading_stack.append((level, title_text))
-                title_path = " > ".join(t for _, t in heading_stack)
-
-                # Save previous chunk if it exists
-                if current_chunk is not None:
-                    current_chunk.finalize_text()
-                    if not current_chunk.is_empty() and not current_chunk.is_excluded():
-                        chunks.append(current_chunk)
-
-                current_chunk = ArticleChunk(
-                    page_title=self.title,
-                    page_url=self.url,
-                    section_title=title_text,
-                    section_path=title_path,
-                    section_level=level,
-                )
+            src = self._get_image_url(img)
+            if not src:
                 continue
 
-            if current_chunk is None:
+            thumbcaption = ts.select_one(".thumbcaption")
+            if thumbcaption:
+                caption = " ".join(thumbcaption.get_text().split())
+            else:
+                cap_el = el.select_one(".thumbcaption")
+                caption = " ".join(cap_el.get_text().split()) if cap_el else ""
+
+            wiki_image = WikipediaImage(src)
+            wiki_image.normalize_url()
+            current_chunk.images.append(ChunkImageMention(image=wiki_image, caption=caption))
+
+    def _handle_gallery(self, el: Tag, current_chunk: ArticleChunk) -> None:
+        """Extract images from a Wikipedia gallery block."""
+        for gallery_item in el.select(".gallerybox"):
+            img: Optional[Tag] = gallery_item.select_one("a img")
+            if not img:
                 continue
 
-            if current_chunk.is_excluded():
-                current_chunk = None
-                break
-
-            # If a section starts with a figure, keep figure in its own chunk
-            if el.name == "figure" and not current_chunk.text_parts:
-                current_chunk.finalize_text()
-                if not current_chunk.is_empty() and not current_chunk.is_excluded():
-                    chunks.append(current_chunk)
-
-                current_chunk = ArticleChunk(
-                    page_title=current_chunk.page_title,
-                    page_url=current_chunk.page_url,
-                    section_title=current_chunk.section_title,
-                    section_path=current_chunk.section_path,
-                    section_level=current_chunk.section_level,
-                )
-
-            # Tables
-            if el.name == "table":
-                classes = el.get("class", [])
-                class_str = " ".join(classes) if classes else ""
-                if "infobox" in class_str.lower():
-                    infobox_text = self._extract_infobox_data(el, current_chunk)
-                    if infobox_text:
-                        current_chunk.text_parts.append(infobox_text)
-                    continue
-
-                table_json = self._extract_table_generic_json(el, current_chunk)
-                if table_json:
-                    current_chunk.text_parts.append(json.dumps(table_json, ensure_ascii=False))
+            src = self._get_image_url(img)
+            if not src:
                 continue
 
-            # Figures
-            if el.name == "figure":
-                img = el.select_one("a img")
-                if img:
-                    src = self._get_image_url(img)
-                    if src:
-                        caption_el = el.select_one("figcaption")
-                        caption = caption_el.get_text(" ", strip=True) if caption_el else ""
-                        wiki_image = WikipediaImage(src)
-                        wiki_image.normalize_url()
-                        current_chunk.images.append(ChunkImageMention(image=wiki_image, caption=caption))
-                continue
+            caption_el = gallery_item.select_one(".gallerytext")
+            caption = " ".join(caption_el.get_text().split()) if caption_el else ""
 
-            # Thumbnails
-            if "thumb" in el_classes:
-                for ts in el.select(".tsingle"):
-                    img = ts.select_one("a img")
-                    if not img:
-                        continue
+            wiki_image = WikipediaImage(src)
+            wiki_image.normalize_url()
+            current_chunk.images.append(ChunkImageMention(image=wiki_image, caption=caption))
 
-                    src = self._get_image_url(img)
-                    if not src:
-                        continue
-
-                    thumbcaption = ts.select_one(".thumbcaption")
-                    if thumbcaption:
-                        caption = thumbcaption.get_text(" ", strip=True)
-                    else:
-                        cap_el = el.select_one(".thumbcaption")
-                        caption = cap_el.get_text(" ", strip=True) if cap_el else ""
-
-                    wiki_image = WikipediaImage(src)
-                    wiki_image.normalize_url()
-                    current_chunk.images.append(ChunkImageMention(image=wiki_image, caption=caption))
-                continue
-
-            # Galleries
-            if "gallery" in el_classes:
-                for gallery_item in el.select(".gallerybox"):
-                    img = gallery_item.select_one("a img")
-                    if not img:
-                        continue
-
-                    src = self._get_image_url(img)
-                    if not src:
-                        continue
-
-                    caption_el = gallery_item.select_one(".gallerytext")
-                    caption = caption_el.get_text(" ", strip=True) if caption_el else ""
-
-                    wiki_image = WikipediaImage(src)
-                    wiki_image.normalize_url()
-                    current_chunk.images.append(ChunkImageMention(image=wiki_image, caption=caption))
-                continue
-
-            # Text content
-            if el.name in {"p", "ul", "ol", "table"}:
-                text = el.get_text(" ", strip=True)
-                if text:
-                    current_chunk.text_parts.append(text)
-
-                    if current_chunk.chars_count() > max_text_size:
-                        current_chunk.finalize_text()
-                        if not current_chunk.is_empty() and not current_chunk.is_excluded():
-                            chunks.append(current_chunk)
-
-                        current_chunk = ArticleChunk(
-                            page_title=current_chunk.page_title,
-                            page_url=current_chunk.page_url,
-                            section_title=current_chunk.section_title,
-                            section_path=current_chunk.section_path,
-                            section_level=current_chunk.section_level,
-                        )
-                        continue
-
-
-        if current_chunk is not None:
-            current_chunk.finalize_text()
-            if not current_chunk.is_empty() and not current_chunk.is_excluded():
-                chunks.append(current_chunk)
-
-        return chunks
-
-    def _get_image_url(self, img: "bs4.element.Tag") -> Optional[str]:
+    def _get_image_url(self, img: Tag) -> Optional[str]:
+        """Extract and normalize an image URL from an <img> tag."""
         src = img.get("src") or img.get("data-src") or img.get("data-file-width") or img.get("href")
         if not src:
             return None
@@ -362,80 +447,31 @@ class WikipediaArticleScraper(BasePageScraper):
         return src
 
     def _extract_table_generic_json(self, table, current_chunk: ArticleChunk):
-        def clean_text(el):
-            return " ".join(el.stripped_strings)
+        """Extract a generic HTML table into a structured JSON-like dict.
 
-        rows = table.find_all("tr")
+        Output is appended as JSON text into the chunk and is intentionally storage-friendly.
+
+        The returned schema is kept stable because downstream uses store it as plain text.
+        """
+        caption, rows = self._table_extract_caption_and_rows(table)
         if not rows:
             return None
 
-        caption = None
-        header_rows = []
-        data_rows = []
+        header_rows, data_rows = self._table_split_header_and_data(rows)
+        columns = self._table_build_column_hierarchies(header_rows)
+        if not columns:
+            return None
 
-        # --- 1. Витягуємо caption (рядок з colspan на всю таблицю)
-        first_row_cells = rows[0].find_all(["td", "th"])
-        if len(first_row_cells) == 1 and first_row_cells[0].has_attr("colspan"):
-            caption = clean_text(first_row_cells[0])
-            rows = rows[1:]
+        structured_rows = self._table_parse_data_rows(data_rows, columns)
 
-        # --- 2. Збираємо header rows (поки є <th>)
-        while rows and rows[0].find_all("th"):
-            header_rows.append(rows.pop(0))
-
-        # --- 3. Побудова багаторівневих заголовків
-        header_matrix = []
-        max_cols = 0
-
-        for hr in header_rows:
-            row = []
-            for cell in hr.find_all("th"):
-                text = clean_text(cell)
-                colspan = int(cell.get("colspan", 1))
-                row.extend([text] * colspan)
-            max_cols = max(max_cols, len(row))
-            header_matrix.append(row)
-
-        # вирівнюємо всі рядки заголовків
-        for row in header_matrix:
-            if len(row) < max_cols:
-                row.extend([""] * (max_cols - len(row)))
-
-        # транспонуємо → отримуємо колонкові ієрархії
-        columns = []
-        for col_idx in range(max_cols):
-            hierarchy = []
-            for row in header_matrix:
-                if row[col_idx]:
-                    hierarchy.append(row[col_idx])
-            columns.append(hierarchy)
-
-        # --- 4. Парсинг data rows
-        structured_rows = []
-
-        for tr in rows:
-            cells = tr.find_all("td")
-            if len(cells) != max_cols:
-                continue
-
-            row_obj = {}
-            for col, cell in zip(columns, cells):
-                key = ".".join(col)
-                value = clean_text(cell)
-
-                # numeric normalization
-                value = value.replace(",", "")
-                try:
-                    if "." in value:
-                        value = float(value)
-                    else:
-                        value = int(value)
-                except ValueError:
-                    pass
-
-                row_obj[key] = value
-
-            structured_rows.append(row_obj)
+        logger.debug(
+            "Parsed table in '%s' / section '%s': cols=%d rows=%d (caption=%s)",
+            self.title,
+            current_chunk.section_path,
+            len(columns),
+            len(structured_rows),
+            bool(caption),
+        )
 
         return {
             "table_context": {
@@ -443,71 +479,169 @@ class WikipediaArticleScraper(BasePageScraper):
                 "caption": caption,
                 "description": "Structured table extracted from HTML with hierarchical headers",
                 "columns": columns,
-                "rows": structured_rows
+                "rows": structured_rows,
             }
         }
 
-    def _extract_infobox_data(self, table, section: ArticleChunk) -> str:
-        """
-        Extract structured data from a Wikipedia infobox table.
+    def _table_extract_caption_and_rows(self, table) -> tuple[Optional[str], list]:
+        """Return (caption_text, rows) where rows is a list of <tr> tags."""
+        def clean_text(el) -> str:
+            return " ".join(getattr(el, "stripped_strings", []) or [])
 
-        Returns formatted text with key-value pairs like:
-        "Capital: Rome\nLanguages: Latin, Greek\n..."
-        """
-        infobox_items = []
-
-        # Find all rows in the infobox
         rows = table.find_all("tr")
+        if not rows:
+            return None, []
+
+        caption = None
+        first_row_cells = rows[0].find_all(["td", "th"])
+        if len(first_row_cells) == 1 and first_row_cells[0].has_attr("colspan"):
+            caption = clean_text(first_row_cells[0])
+            rows = rows[1:]
+
+        return caption, rows
+
+    def _table_split_header_and_data(self, rows: list) -> tuple[list, list]:
+        """Split table rows into header rows (leading rows containing <th>) and data rows."""
+        header_rows = []
+        while rows and rows[0].find_all("th"):
+            header_rows.append(rows.pop(0))
+        return header_rows, rows
+
+    def _table_build_column_hierarchies(self, header_rows: list) -> list[list[str]]:
+        """Build column hierarchy arrays from multi-row headers."""
+        def clean_text(el) -> str:
+            return " ".join(getattr(el, "stripped_strings", []) or [])
+
+        if not header_rows:
+            return []
+
+        header_matrix: list[list[str]] = []
+        max_cols = 0
+
+        for hr in header_rows:
+            row: list[str] = []
+            for cell in hr.find_all("th"):
+                text = clean_text(cell)
+                colspan = int(cell.get("colspan", 1))
+                row.extend([text] * colspan)
+            max_cols = max(max_cols, len(row))
+            header_matrix.append(row)
+
+        # normalize all header rows length
+        for r in header_matrix:
+            if len(r) < max_cols:
+                r.extend([""] * (max_cols - len(r)))
+
+        columns: list[list[str]] = []
+        for col_idx in range(max_cols):
+            hierarchy: list[str] = []
+            for r in header_matrix:
+                if r[col_idx]:
+                    hierarchy.append(r[col_idx])
+            columns.append(hierarchy)
+
+        return columns
+
+    def _table_parse_data_rows(self, data_rows: list, columns: list[list[str]]) -> list[dict]:
+        """Parse data rows into list of dicts keyed by dot-joined header hierarchy."""
+        def clean_text(el) -> str:
+            return " ".join(getattr(el, "stripped_strings", []) or [])
+
+        max_cols = len(columns)
+        structured_rows: list[dict] = []
+
+        for tr in data_rows:
+            cells = tr.find_all("td")
+            if len(cells) != max_cols:
+                continue
+
+            row_obj: dict = {}
+            for col, cell in zip(columns, cells):
+                key = ".".join(col)
+                value: object = clean_text(cell)
+
+                # numeric normalization
+                if isinstance(value, str):
+                    raw = value.replace(",", "")
+                    try:
+                        value = float(raw) if "." in raw else int(raw)
+                    except ValueError:
+                        value = value
+
+                row_obj[key] = value
+
+            structured_rows.append(row_obj)
+
+        return structured_rows
+
+    def _extract_infobox_data(self, table, section: ArticleChunk) -> str:
+        """Extract a Wikipedia infobox into readable key-value lines.
+
+        Also collects images found inside the infobox and attaches them to `section.images`.
+
+        Returns:
+            A newline-delimited text representation, or empty string if nothing found.
+        """
+        rows = table.find_all("tr")
+        if not rows:
+            return ""
+
+        items: list[str] = []
+        images_added = 0
 
         for row in rows:
-            # Skip header rows (usually the title row)
-            header = row.find("th", class_=lambda x: x and "infobox-label" in " ".join(x).lower())
-            if not header:
-                # Try alternative: look for th elements
-                header = row.find("th")
+            key_value = self._infobox_extract_key_value(row)
+            if key_value:
+                items.append(key_value)
 
-            if header:
-                # This is a key-value row
-                key = header.get_text(" ", strip=True)
+            if self._infobox_maybe_extract_image(row, section):
+                images_added += 1
 
-                # Get the value (usually in td)
-                value_cell = row.find("td")
-                if value_cell:
-                    # Extract text, handling links and lists
-                    value_parts = []
+        if images_added:
+            logger.debug(
+                "Infobox images added for '%s' / section '%s': %d",
+                self.title,
+                section.section_path,
+                images_added,
+            )
 
-                    # If no links found, get all text
-                    if not value_parts:
-                        value_text = value_cell.get_text(" ", strip=True)
-                    else:
-                        # Combine link texts, removing duplicates while preserving order
-                        seen = set()
-                        unique_parts = []
-                        for part in value_cell.stripped_strings:
-                            if part not in seen:
-                                seen.add(part)
-                                unique_parts.append(part)
-                        value_text = ", ".join(unique_parts)
+        return "\n".join(items) if items else ""
 
-                    if value_text:
-                        infobox_items.append(f"{key}: {value_text}")
+    def _infobox_extract_key_value(self, row) -> Optional[str]:
+        """Extract a single 'Key: Value' line from an infobox row."""
+        header = row.find("th", class_=lambda x: x and "infobox-label" in " ".join(x).lower())
+        if not header:
+            header = row.find("th")
+        if not header:
+            return None
 
-            # Extract images from infobox
-            img = row.select_one("img")
+        key = " ".join(header.get_text().split())
+        if not key:
+            return None
 
-            if img:
-                src = self._get_image_url(img)
-                if not src:
-                    continue
+        value_cell = row.find("td")
+        if not value_cell:
+            return None
 
-                wiki_image = WikipediaImage(src)
-                wiki_image.normalize_url()
+        value_text = " ".join(value_cell.get_text().split())
+        if not value_text:
+            return None
 
-                section.images.append(
-                    ChunkImageMention(image=wiki_image, caption=row.text.strip()),
-                )
+        return f"{key}: {value_text}"
 
-        # Format as readable text
-        if infobox_items:
-            return "\n".join(infobox_items)
-        return ""
+    def _infobox_maybe_extract_image(self, row, section: ArticleChunk) -> bool:
+        """Extract an <img> inside an infobox row, if present."""
+        img = row.select_one("img")
+        if not img:
+            return False
+
+        src = self._get_image_url(img)
+        if not src:
+            return False
+
+        wiki_image = WikipediaImage(src)
+        wiki_image.normalize_url()
+
+        caption = " ".join(row.get_text().split())
+        section.images.append(ChunkImageMention(image=wiki_image, caption=caption))
+        return True
