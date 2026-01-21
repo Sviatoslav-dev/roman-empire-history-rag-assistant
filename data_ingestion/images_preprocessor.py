@@ -65,10 +65,7 @@ class ImagesPreprocessor:
         except Exception as conv_err:
             logger.warning("Failed to convert SVG %s to PNG: %s", svg_path, conv_err)
             if png_path.exists():
-                try:
-                    self._safe_unlink(png_path)
-                except Exception:
-                    pass
+                self._safe_unlink(png_path)
             return False
 
     def convert_svgs_to_png(self, *, remove_original: bool = False) -> int:

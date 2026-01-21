@@ -209,10 +209,6 @@ class WikipediaArticleScraper(BasePageScraper):
         logger.info("Chunked '%s' into %d chunks", self.title, len(chunks))
         return chunks
 
-    # -------------------------
-    # Helpers (chunking)
-    # -------------------------
-
     def _cleanup_for_chunking(self) -> None:
         """Remove noisy navigation/boilerplate blocks that should not be embedded."""
         toc = self.soup.find("div", id="toc")
@@ -554,15 +550,7 @@ class WikipediaArticleScraper(BasePageScraper):
             row_obj: dict = {}
             for col, cell in zip(columns, cells):
                 key = ".".join(col)
-                value: object = clean_text(cell)
-
-                # numeric normalization
-                if isinstance(value, str):
-                    raw = value.replace(",", "")
-                    try:
-                        value = float(raw) if "." in raw else int(raw)
-                    except ValueError:
-                        value = value
+                value = clean_text(cell)
 
                 row_obj[key] = value
 

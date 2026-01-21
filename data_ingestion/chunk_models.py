@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import List
 
 from data_ingestion.wikipedia_image import WikipediaImage
 

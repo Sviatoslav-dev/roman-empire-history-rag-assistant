@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List
+from uuid import uuid4
 
 from data_ingestion.chunk_models import ArticleChunk
 from data_ingestion.images_preprocessor import ImagesPreprocessor
@@ -81,24 +82,25 @@ class ChunkIngestionPipeline:
         ]
         return chunk_texts, chunk_metadata
 
-    def prepare_images_collection(self) -> tuple[Dict[str, Dict], List[str], List[Dict], List[int]]:
+    def prepare_images_collection(self) -> tuple[Dict[str, Dict], List[str], List[Dict], List[str]]:
         """Build inputs for upserting IMAGE_COLLECTION.
 
         Returns:
             (unique_images_by_url, image_paths, image_metadata, image_ids)
 
             - unique_images_by_url: dict[url -> record] where record contains:
-                image_id (int), image_url (str), local_path (str)
+                image_id (str), image_url (str), local_path (str)
             - image_paths: List[str] local paths aligned with image_ids
             - image_metadata: List[dict] aligned with image_paths; keys: image_url, local_path
-            - image_ids: List[int] stable ids for this run (starting at IMAGE_ID_START)
+            - image_ids: List[str] stable ids for this run
 
         Notes:
             - Unique images are deduplicated by normalized URL.
             - Image local_path is read from PostgreSQL metadata store.
+            - We use UUID string point IDs to avoid any possible collision with
+              other collections' integer IDs.
         """
         unique_images: Dict[str, Dict] = {}
-        next_image_id = 1_000_000
 
         for chunk in self.chunks:
             for mention in chunk.images:
@@ -116,15 +118,14 @@ class ChunkIngestionPipeline:
                     continue
 
                 unique_images[img_url] = {
-                    "image_id": next_image_id,
+                    "image_id": str(uuid4()),
                     "image_url": img_url,
                     "local_path": str(local_path),
                 }
-                next_image_id += 1
 
         image_paths: List[str] = []
         image_metadata: List[Dict] = []
-        image_ids: List[int] = []
+        image_ids: List[str] = []
 
         for rec in unique_images.values():
             image_ids.append(rec["image_id"])

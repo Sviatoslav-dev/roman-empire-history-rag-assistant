@@ -18,6 +18,8 @@ logger = get_logger(__name__)
 TEXT_EMBEDDING_MODEL = os.getenv("TEXT_EMBEDDING_MODEL")
 IMAGE_EMBEDDING_MODEL = os.getenv("IMAGE_EMBEDDING_MODEL")
 
+DEFAULT_OPENCLIP_EMBED_DIM = 512  # OpenCLIP ViT-B/32 embedding dimension
+
 class TextEmbedder:
     """Text embedding model using sentence-transformers."""
 
@@ -85,7 +87,7 @@ class ImageEmbedder:
                 except Exception:
                     logger.warning("Failed to process image for embedding: %s", image_path, exc_info=True)
                     # Return zero vector if image can't be processed
-                    embeddings.append(np.zeros(512))
+                    embeddings.append(np.zeros(DEFAULT_OPENCLIP_EMBED_DIM))
 
         return np.array(embeddings)
 

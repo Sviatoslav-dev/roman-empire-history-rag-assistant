@@ -1,11 +1,12 @@
 """RAG pipeline for question answering."""
+import argparse
 import os
 from typing import Optional, Tuple
 
 from dotenv import load_dotenv
 
-from models.schemas import RetrievedContext, RetrievedImage
 from rag.langchain_adapter import build_langchain_rag_chain
+from rag.rag_model import RetrievedImage, RetrievedContext
 from rag.retriever import QdrantRetriever
 from rag.prompts import DEFAULT_RAG_PROMPTS, RagPrompts
 from rag.llm_client import LLMClient
@@ -178,19 +179,25 @@ class RAGPipeline:
 if __name__ == "__main__":
     # Minimal smoke run so you can execute: `python -m rag.pipeline`
     # or `python rag/pipeline.py` from the project root.
-    sample_question = os.environ.get(
-        "RAG_DEMO_QUESTION",
-        # "Who was Augustus?"
-        # "What is Byzantine Empire?"
-        # "What was the fertility rate in Roman Egypt for ages 25\u201329?"
-        "What can you say about this picture?"
+    parser = argparse.ArgumentParser(description="Run RAG pipeline demo")
+    parser.add_argument(
+        "--question", "-q",
+        default=os.environ.get(
+            "RAG_DEMO_QUESTION",
+            "What can you say about this picture?"
+        ),
+        help="Question to ask the RAG pipeline",
     )
+    parser.add_argument(
+        "--image-path", "-i",
+        default="../tests/data/images/Colosseum_in_Rome,_Italy_-_April_2007.jpg",
+        help="Path to the query image (use --no-image to disable image retrieval)",
+    )
+    parser.add_argument("--no-image", action="store_true", help="Run without image retrieval")
+    args = parser.parse_args()
 
-    # image_path = "../tests/data/images/Tunisia-3363_-_Amphitheatre_Spectacle.jpg"
-    image_path = "../tests/data/images/Colosseum_in_Rome,_Italy_-_April_2007.jpg"
-    # image_path = "../tests/data/images/colosseum.png"
-    # image_path = None
-
+    sample_question = args.question
+    image_path = None if args.no_image else args.image_path
     logger.info("Running RAG pipeline demo")
 
     pipeline = RAGPipeline()

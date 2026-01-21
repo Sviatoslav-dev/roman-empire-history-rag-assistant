@@ -11,7 +11,7 @@ from data_ingestion.chunk_models import ArticleChunk
 load_dotenv()
 
 logger = get_logger(__name__)
-_postges = get_pg_metadata_store()
+_postgres = get_pg_metadata_store()
 _wikipedia_client = WikipediaApiClient()
 
 class WikipediaArticleFilter:
@@ -60,7 +60,7 @@ class WikipediaArticleFilter:
 
         for article in articles:
             try:
-                quality = _postges.get_article_quality(article.title)
+                quality = _postgres.get_article_quality(article.title)
 
                 if quality is None:
                     # Backward-compatible fallback: compute from HTML if DB row is incomplete.
@@ -90,24 +90,26 @@ class WikipediaArticleFilter:
 
         return filtered
 
-    def is_license_allowed(self, license: str) -> bool:
+    def is_license_allowed(self, licence: str) -> bool:
         """Return True if the image license looks safe-to-use.
 
         We conservatively reject common non-free / fair-use indicators.
         When metadata is missing, we default to allowing.
 
         Args:
-            license: License string (already extracted from metadata store).
+            licence: License string (already extracted from metadata store).
         """
+        licence = licence.lower()
 
-        tokens = set(license.split())
+        tokens = set(licence.split())
 
         for trigger in self.LICENSE_FORBIDDEN_TRIGGERS:
-            if " " in trigger:
-                if trigger in license:
+            t = " ".join(trigger.lower().split())
+            if " " in t:
+                if t in licence:
                     return False
             else:
-                if trigger in tokens:
+                if t in tokens:
                     return False
 
         return True
@@ -121,7 +123,7 @@ class WikipediaArticleFilter:
         for chunk in chunks:
             kept_images = []
             for mention in chunk.images:
-                meta = _postges.get_image_by_url(mention.image.url)
+                meta = _postgres.get_image_by_url(mention.image.url)
                 licence = meta.licence if meta is not None else None
                 # When metadata is missing, default to allowing.
                 if not licence or self.is_license_allowed(licence):

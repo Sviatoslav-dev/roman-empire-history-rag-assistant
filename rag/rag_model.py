@@ -1,22 +1,6 @@
 """Pydantic schemas for API requests and responses."""
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from datetime import datetime
-from enum import Enum
-
-
-class MessageRole(str, Enum):
-    """Message role types."""
-    USER = "user"
-    ASSISTANT = "assistant"
-
-
-class ChatMessage(BaseModel):
-    """Chat message model."""
-    role: MessageRole
-    content: str
-    timestamp: datetime = Field(default_factory=datetime.now)
-
 
 class RetrievedImage(BaseModel):
     """Retrieved image metadata."""

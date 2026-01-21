@@ -3,6 +3,7 @@ import os
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.http.exceptions import UnexpectedResponse
 from typing import List, Tuple, Optional
 
 from rag.embedding import TextEmbedder, ImageEmbedder
@@ -14,6 +15,20 @@ QDRANT_PORT = os.getenv("QDRANT_PORT")
 TEXT_COLLECTION_NAME = os.getenv("TEXT_COLLECTION_NAME")
 IMAGE_COLLECTION_NAME = os.getenv("IMAGE_COLLECTION_NAME")
 LINK_COLLECTION_NAME = os.getenv("LINK_COLLECTION_NAME", "chunk_image_links")
+
+
+def _is_missing_collection_error(exc: UnexpectedResponse) -> bool:
+    """Return True if the exception indicates Qdrant collection is missing (HTTP 404)."""
+    status = getattr(exc, "status_code", None)
+    if status == 404:
+        return True
+
+    # Some versions expose a `response` object.
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 404:
+        return True
+
+    return False
 
 
 class QdrantRetriever:
@@ -38,43 +53,39 @@ class QdrantRetriever:
         self._ensure_collections()
 
     def _ensure_collections(self):
-        """Create required Qdrant collections if they don't exist.
-        """
+        """Create required Qdrant collections if they don't exist."""
         # Text collection (384 dimensions for all-MiniLM-L6-v2)
         try:
             self.client.get_collection(TEXT_COLLECTION_NAME)
-        except Exception:
+        except UnexpectedResponse as e:
+            if not _is_missing_collection_error(e):
+                raise
             self.client.create_collection(
                 collection_name=TEXT_COLLECTION_NAME,
-                vectors_config=VectorParams(
-                    size=384,
-                    distance=Distance.COSINE
-                )
+                vectors_config=VectorParams(size=384, distance=Distance.COSINE),
             )
 
         # Image collection (512 dimensions for OpenCLIP ViT-B-32)
         try:
             self.client.get_collection(IMAGE_COLLECTION_NAME)
-        except Exception:
+        except UnexpectedResponse as e:
+            if not _is_missing_collection_error(e):
+                raise
             self.client.create_collection(
                 collection_name=IMAGE_COLLECTION_NAME,
-                vectors_config=VectorParams(
-                    size=512,
-                    distance=Distance.COSINE
-                )
+                vectors_config=VectorParams(size=512, distance=Distance.COSINE),
             )
 
         # Link collection: dummy 1D vectors, used only for payload filtering.
         # Qdrant requires vectors unless you use sparse-only collections; we keep this simple.
         try:
             self.client.get_collection(LINK_COLLECTION_NAME)
-        except Exception:
+        except UnexpectedResponse as e:
+            if not _is_missing_collection_error(e):
+                raise
             self.client.create_collection(
                 collection_name=LINK_COLLECTION_NAME,
-                vectors_config=VectorParams(
-                    size=1,
-                    distance=Distance.COSINE
-                )
+                vectors_config=VectorParams(size=1, distance=Distance.COSINE),
             )
 
     def search_text(
@@ -414,7 +425,7 @@ class QdrantRetriever:
             return payload.get("text", ""), {k: v for k, v in payload.items() if k != "text"}
         return None
 
-    def get_links_by_image_id(self, image_id: int, limit: int = 50) -> List[dict]:
+    def get_links_by_image_id(self, image_id: str | int, limit: int = 50) -> List[dict]:
         """Return link payload dicts for a given image id.
 
         Link payloads contain relationship-level fields such as caption and
