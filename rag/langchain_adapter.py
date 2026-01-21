@@ -7,13 +7,19 @@ pipeline.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from langchain.chains.retrieval_qa.base import RetrievalQA
 from langchain_core.documents import Document
 from langchain_core.language_models.llms import LLM
 from langchain_core.prompts import PromptTemplate
 from langchain_core.retrievers import BaseRetriever
+
+from langchain_core.callbacks import (
+    CallbackManagerForLLMRun,
+    CallbackManagerForRetrieverRun,
+    AsyncCallbackManagerForRetrieverRun,
+)
 
 from rag.llm_client import LLMClient
 from rag.retriever import QdrantRetriever
@@ -32,7 +38,13 @@ class LangChainLLM(LLM):
     def _llm_type(self) -> str:
         return "custom-llm-client"
 
-    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> str:
         text = self._client.generate(prompt, max_new_tokens=self._max_new_tokens, temperature=self._temperature)
         if stop:
             for s in stop:
@@ -49,15 +61,29 @@ class QdrantLangChainRetriever(BaseRetriever):
         self._retriever = retriever
         self._top_k = top_k_text
 
-    def _get_relevant_documents(self, query: str) -> List[Document]:
+    def _get_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun,
+    ) -> List[Document]:
         results = self._retriever.search_text(query, top_k=self._top_k)
         return [
             Document(page_content=text, metadata={**metadata, "score": score, "chunk_id": chunk_id})
             for text, score, metadata, chunk_id in results
         ]
 
-    async def _aget_relevant_documents(self, query: str) -> List[Document]:
-        return self._get_relevant_documents(query)
+    async def _aget_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: AsyncCallbackManagerForRetrieverRun,
+    ) -> List[Document]:
+        results = self._retriever.search_text(query, top_k=self._top_k)
+        return [
+            Document(page_content=text, metadata={**metadata, "score": score, "chunk_id": chunk_id})
+            for text, score, metadata, chunk_id in results
+        ]
 
 
 def build_langchain_rag_chain(
@@ -80,11 +106,12 @@ def build_langchain_rag_chain(
     )
     prompt = PromptTemplate(template=template, input_variables=["context", "question"])
 
-    return RetrievalQA.from_chain_type(
+    chain = RetrievalQA.from_chain_type(
         llm=lc_llm,
         chain_type="stuff",
         retriever=lc_retriever,
         return_source_documents=True,
         chain_type_kwargs={"prompt": prompt},
     )
-
+    # Runtime is a RetrievalQA, but stubs may type this factory as a base class.
+    return chain  # type: ignore[return-value]

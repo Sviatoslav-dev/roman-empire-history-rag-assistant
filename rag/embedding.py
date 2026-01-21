@@ -21,18 +21,18 @@ IMAGE_EMBEDDING_MODEL = os.getenv("IMAGE_EMBEDDING_MODEL")
 class TextEmbedder:
     """Text embedding model using sentence-transformers."""
 
-    def __init__(self, model_name: str = None):
+    def __init__(self, model_name: str | None = None):
         """Create the embedder."""
         model_name = model_name or TEXT_EMBEDDING_MODEL
         self.model = SentenceTransformer(model_name)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(self.device)
-    
+
     def embed(self, texts: Union[str, List[str]]) -> np.ndarray:
         """Generate embeddings for text(s)."""
         if isinstance(texts, str):
             texts = [texts]
-        
+
         embeddings = self.model.encode(
             texts,
             convert_to_numpy=True,
@@ -47,7 +47,7 @@ class ImageEmbedder:
     Embeddings are L2-normalized to work well with cosine similarity in Qdrant.
     """
 
-    def __init__(self, model_name: str = None):
+    def __init__(self, model_name: str | None = None):
         """Create the embedder.
 
         Args:
@@ -62,7 +62,7 @@ class ImageEmbedder:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(self.device)
         self.model.eval()
-    
+
     def embed(self, image_paths: Union[str, List[str]]) -> np.ndarray:
         """Generate embeddings for image(s).
 
@@ -71,7 +71,7 @@ class ImageEmbedder:
         """
         if isinstance(image_paths, str):
             image_paths = [image_paths]
-        
+
         embeddings = []
         with torch.no_grad():
             for image_path in image_paths:
@@ -86,14 +86,14 @@ class ImageEmbedder:
                     logger.warning("Failed to process image for embedding: %s", image_path, exc_info=True)
                     # Return zero vector if image can't be processed
                     embeddings.append(np.zeros(512))
-        
+
         return np.array(embeddings)
-    
+
     def embed_text(self, texts: Union[str, List[str]]) -> np.ndarray:
         """Generate embeddings for text(s) using OpenCLIP text encoder."""
         if isinstance(texts, str):
             texts = [texts]
-        
+
         embeddings = []
         with torch.no_grad():
             for text in texts:

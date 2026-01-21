@@ -428,8 +428,14 @@ class WikipediaArticleScraper(BasePageScraper):
 
     def _get_image_url(self, img: Tag) -> Optional[str]:
         """Extract and normalize an image URL from an <img> tag."""
-        src = img.get("src") or img.get("data-src") or img.get("data-file-width") or img.get("href")
-        if not src:
+        src_val = img.get("src") or img.get("data-src") or img.get("href")
+
+        if isinstance(src_val, list):
+            src = src_val[0] if src_val else None
+        else:
+            src = src_val
+
+        if not isinstance(src, str) or not src:
             return None
 
         # Skip data URIs and very small images (likely icons)

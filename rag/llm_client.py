@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from llama_cpp import Llama
 
@@ -96,7 +96,20 @@ class LLMClient:
                 max_tokens=max_new_tokens,
                 stop=stop,
             )
-            return (resp["choices"][0]["message"]["content"] or "").strip()
+            # llama-cpp-python may return dict or an iterator depending on streaming.
+            if isinstance(resp, dict):
+                message = resp.get("choices", [{}])[0].get("message", {})
+                return (message.get("content") or "").strip()
+
+            # If streaming was enabled somehow, collect chunks.
+            content_parts: list[str] = []
+            for event in resp:  # type: ignore[assignment]
+                if isinstance(event, dict):
+                    delta = event.get("choices", [{}])[0].get("delta", {})
+                    part = delta.get("content")
+                    if isinstance(part, str):
+                        content_parts.append(part)
+            return "".join(content_parts).strip()
 
         response = self.model(
             prompt,
@@ -107,4 +120,13 @@ class LLMClient:
             stop=stop,
         )
 
-        return response["choices"][0]["text"].strip()
+        if isinstance(response, dict):
+            return str(response.get("choices", [{}])[0].get("text", "")).strip()
+
+        text_parts: list[str] = []
+        for event in response:  # type: ignore[assignment]
+            if isinstance(event, dict):
+                txt = event.get("choices", [{}])[0].get("text")
+                if isinstance(txt, str):
+                    text_parts.append(txt)
+        return "".join(text_parts).strip()

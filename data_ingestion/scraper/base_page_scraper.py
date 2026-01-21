@@ -21,4 +21,4 @@ class BasePageScraper:
         """
         self.soup: Any = BeautifulSoup(html, "html.parser")
         self.title: str = title
-        self.url: str = url
+        self.url: str | None = url

@@ -20,6 +20,7 @@ Tables are created automatically on first use (can be replaced by migrations lat
 
 from dataclasses import dataclass
 import os
+from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
@@ -97,11 +98,15 @@ class PgMetadataStore:
     def enabled(self) -> bool:
         return self._enabled
 
-    def _connect(self) -> psycopg.Connection:
+    def _connect(self) -> psycopg.Connection[Any]:
         """Open a PostgreSQL connection.
 
         Uses autocommit because ingestion updates are small, independent upserts.
         """
+        if not self._dsn:
+            # This should be guarded by __init__, but keep mypy and callers safe.
+            raise ValueError("POSTGRES_DSN is empty")
+
         # autocommit keeps calls small and safe for incremental updates
         return psycopg.connect(self._dsn, autocommit=True, row_factory=dict_row)
 

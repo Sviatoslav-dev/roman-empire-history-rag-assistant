@@ -121,8 +121,10 @@ class WikipediaArticleFilter:
         for chunk in chunks:
             kept_images = []
             for mention in chunk.images:
-                license = _meta.get_image_by_url(mention.image.url).licence
-                if license and self.is_license_allowed(license):
+                meta = _meta.get_image_by_url(mention.image.url)
+                licence = meta.licence if meta is not None else None
+                # When metadata is missing, default to allowing.
+                if not licence or self.is_license_allowed(licence):
                     kept_images.append(mention)
 
             filtered.append(

@@ -109,7 +109,12 @@ class ChunkIngestionPipeline:
                 if img_url in unique_images:
                     continue
 
-                local_path = self.metadata_store.get_image_by_url(img_url).local_path
+                meta = self.metadata_store.get_image_by_url(img_url)
+                local_path = meta.local_path if meta is not None else None
+                if not local_path:
+                    # Image wasn't downloaded / persisted yet, skip.
+                    continue
+
                 unique_images[img_url] = {
                     "image_id": next_image_id,
                     "image_url": img_url,
