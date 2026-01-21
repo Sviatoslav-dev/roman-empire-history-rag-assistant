@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from urllib.parse import unquote, urlparse
@@ -11,23 +11,14 @@ from data_ingestion.wikipedia_api_client import WikipediaApiClient
 _wikipedia_client = WikipediaApiClient()
 
 
+@dataclass(slots=True)
 class WikipediaImage:
-    """Work with a single Wikipedia/Wikimedia image URL + related metadata.
+    """Work with a single Wikipedia/Wikimedia image URL + related metadata."""
 
-    This class intentionally has no I/O.
+    url: str
+    local_path: Path | None = None
 
-    Usage:
-        img = WikipediaImage(url).normalize_url()
-        filename = img.get_filename()
-        if img.is_license_allowed(extmetadata): ...
-    """
-
-
-    def __init__(self, url: str):
-        self.url = url
-        self.local_path: Path | None = None
-
-    def convert_thumbnail_to_fullsize(self):
+    def convert_thumbnail_to_fullsize(self) -> None:
         """Convert a Wikimedia thumbnail URL to the original full-size file URL."""
 
         parts = self.url.split("/thumb/")
@@ -80,56 +71,4 @@ class WikipediaImage:
         """Extract the final path segment (decoded) from the image URL."""
         path = urlparse(self.url).path
         return unquote(os.path.basename(path))
-
-    @staticmethod
-    def _normalize_license_text(text: str) -> str:
-        text = text.lower()
-        text = re.sub(r"[-_/]", " ", text)
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
-
-    def is_license_allowed(self, extmetadata: dict | None = None) -> bool:
-        """Return True if the image license looks safe-to-use.
-
-        We conservatively reject common non-free / fair-use indicators.
-        When metadata is missing, we default to allowing.
-
-        Args:
-            extmetadata: Optional Wikimedia `imageinfo.extmetadata` dict. If not provided,
-                metadata is fetched via the Wikipedia API.
-        """
-        if extmetadata is None:
-            extmetadata = _wikipedia_client.get_image_license(self.get_filename())
-
-        if not extmetadata:
-            return True
-
-        license_name = (extmetadata.get("LicenseShortName") or {}).get("value", "")
-        usage_terms = (extmetadata.get("UsageTerms") or {}).get("value", "")
-
-        combined = self._normalize_license_text(f"{license_name} {usage_terms}")
-        tokens = set(combined.split())
-
-        forbidden_triggers: tuple[str, ...] = (
-            "fair use",
-            "fair",
-            "non free",
-            "nonfree",
-            "copyright",
-            "all rights reserved",
-            "noncommercial",
-            "no derivatives",
-            "nc",
-            "nd",
-        )
-
-        for trigger in forbidden_triggers:
-            if " " in trigger:
-                if trigger in combined:
-                    return False
-            else:
-                if trigger in tokens:
-                    return False
-
-        return True
 

@@ -1,4 +1,3 @@
-import os
 from typing import Optional
 
 import time
@@ -56,11 +55,9 @@ class WikipediaApiClient:
             logger.error("Error fetching page '%s': %s", title, e)
             return None
 
-
         response = requests.get(page.url, headers=self.HEADERS)
         response.raise_for_status()
         html = response.text
-
 
         if not html:
             logger.warning("No HTML content for '%s'", title)
@@ -131,6 +128,10 @@ class WikipediaApiClient:
                             f.write(chunk)
                 return str(filepath)
             else:
-                print(
-                    f"Warning: URL {image_url} returned non-image content: {content_type}, length: {content_length}")
+                logger.warning(
+                    "URL returned non-image content: url=%s content_type=%s content_length=%s",
+                    image_url,
+                    content_type,
+                    content_length,
+                )
         return response

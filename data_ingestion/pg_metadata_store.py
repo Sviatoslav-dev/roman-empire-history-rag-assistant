@@ -65,12 +65,23 @@ class IngestionImageRowWithMetadata:
 
 
 class PgMetadataStore:
+    """PostgreSQL-backed metadata store used during ingestion."""
+
     def __init__(
         self,
         dsn: str | None = None,
         *,
         enabled: bool | None = True,
     ) -> None:
+        """Create the store.
+
+        Args:
+            dsn: PostgreSQL DSN. Defaults to POSTGRES_DSN env var.
+            enabled: If None, auto-enables when dsn is present. If True, requires dsn.
+
+        Raises:
+            ValueError: When enabled is True but DSN is missing.
+        """
         self._dsn = dsn or DEFAULT_DSN
         if enabled is None:
             enabled = bool(self._dsn)
@@ -87,10 +98,21 @@ class PgMetadataStore:
         return self._enabled
 
     def _connect(self) -> psycopg.Connection:
+        """Open a PostgreSQL connection.
+
+        Uses autocommit because ingestion updates are small, independent upserts.
+        """
         # autocommit keeps calls small and safe for incremental updates
         return psycopg.connect(self._dsn, autocommit=True, row_factory=dict_row)
 
     def _ensure_schema(self) -> None:
+        """Create ingestion tables/indexes if they don't exist.
+
+        Called automatically when store is enabled.
+
+        Raises:
+            Exception: Re-raises DB errors after logging.
+        """
         ddl = SQL(
             """
         create table if not exists ingestion_article (
@@ -130,6 +152,10 @@ class PgMetadataStore:
             raise
 
     def _execute(self, sql: SQL, params: tuple) -> None:
+        """Execute a statement if enabled.
+
+        This is used by upsert/update methods to centralize the `enabled` guard.
+        """
         if not self._enabled:
             return
         with self._connect() as conn:
@@ -151,6 +177,7 @@ class PgMetadataStore:
         self._execute(sql, (title,))
 
     def update_article_url(self, title: str, url: str) -> None:
+        """Upsert an article URL for a given title."""
         sql = SQL(
             """
         insert into ingestion_article(title, url)
@@ -163,6 +190,7 @@ class PgMetadataStore:
         self._execute(sql, (title, url))
 
     def update_article_local_path(self, title: str, local_path: str) -> None:
+        """Upsert the local HTML file path for a given title."""
         sql = SQL(
             """
         insert into ingestion_article(title, local_path)
@@ -175,6 +203,7 @@ class PgMetadataStore:
         self._execute(sql, (title, local_path))
 
     def update_article_quality(self, title: str, quality: ArticleQuality) -> None:
+        """Upsert quality metrics for a given title."""
         sql = SQL(
             """
         insert into ingestion_article(
@@ -204,6 +233,7 @@ class PgMetadataStore:
     # ------------------------- Image incremental upserts -------------------------
 
     def upsert_image_url(self, url: str) -> None:
+        """Create an image record as soon as we learn the URL."""
         sql = SQL(
             """
         insert into ingestion_image(url)
@@ -223,6 +253,18 @@ class PgMetadataStore:
         filename: str | None = None,
         extension: str | None = None,
     ) -> None:
+        """Upsert image metadata.
+
+        Fields are merged using COALESCE, so passing None won't overwrite existing
+        values in the database.
+
+        Args:
+            url: Image URL (primary key).
+            licence: License short name (best-effort).
+            local_path: Local path on disk.
+            filename: Stored filename.
+            extension: File extension.
+        """
         sql = SQL(
             """
         insert into ingestion_image(url, licence, local_path, filename, extension)
@@ -411,6 +453,10 @@ _store: PgMetadataStore | None = None
 
 
 def get_pg_metadata_store() -> PgMetadataStore:
+    """Return a process-wide singleton PgMetadataStore.
+
+    Ingestion code uses this to avoid passing the store through every call.
+    """
     global _store
     if _store is None:
         _store = PgMetadataStore()

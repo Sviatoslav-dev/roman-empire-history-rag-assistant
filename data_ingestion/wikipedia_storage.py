@@ -83,11 +83,13 @@ class WikipediaStorage:
         file_path.write_text(html, encoding="utf-8")
 
     def image_filepath(self, title: str) -> Path:
+        """Return the on-disk path where an image with the given filename should live."""
         filename = self.image_title_to_filename(title)
         filepath = IMAGES_DIR / filename
         return filepath
 
     def image_exists(self, title: str) -> bool:
+        """Return True if an image file already exists on disk."""
         return self.image_filepath(title).exists()
 
     def article_title_to_filename(self, title: str) -> str:
@@ -97,7 +99,7 @@ class WikipediaStorage:
         return safe_name
 
     def image_title_to_filename(self, title: str) -> str:
-        """Return a filesystem-safe filename (without extension) for a image title."""
+        """Return a filesystem-safe filename (without extension) for an image title."""
         max_length = 255
 
         safe_name = unquote(title).replace(" ", "_")

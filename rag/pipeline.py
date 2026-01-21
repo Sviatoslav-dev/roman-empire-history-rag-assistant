@@ -8,6 +8,7 @@ from llama_cpp import Llama
 
 from models.schemas import ChatMessage, RetrievedContext, RetrievedImage
 from rag.retriever import QdrantRetriever
+from logger import get_logger
 
 # --- LangChain additions ---
 from langchain_core.prompts import PromptTemplate
@@ -17,6 +18,8 @@ from langchain_core.retrievers import BaseRetriever
 from langchain_core.language_models.llms import LLM
 
 load_dotenv()
+
+logger = get_logger(__name__)
 
 # GGUF model path - Qwen 2.5 3B Instruct quantized
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -41,9 +44,9 @@ class LLMClient:
         self.n_gpu_layers = n_gpu_layers if n_gpu_layers is not None else N_GPU_LAYERS
         self.n_ctx = n_ctx if n_ctx is not None else N_CTX
 
-        print(f"Loading LLM model: {self.model_path}")
-        print(f"GPU layers: {self.n_gpu_layers}")
-        print(f"Context size: {self.n_ctx}")
+        logger.info("Loading LLM model: %s", self.model_path)
+        logger.info("GPU layers: %s", self.n_gpu_layers)
+        logger.info("Context size: %s", self.n_ctx)
 
         self.model = Llama(
             model_path=self.model_path,
@@ -51,7 +54,7 @@ class LLMClient:
             n_ctx=self.n_ctx,
             verbose=False,
         )
-        print(f"✓ Model loaded successfully")
+        logger.info("Model loaded successfully")
 
 
     def generate(
@@ -69,7 +72,7 @@ class LLMClient:
         reduce instruction leakage.
         """
         if self.model is None:
-            return "⚠️ LLM not loaded. Please configure your model. See error messages above."
+            return "\u26a0\ufe0f LLM not loaded. Please configure your model. See error messages above."
 
         stop = [
             "User:",
@@ -130,7 +133,10 @@ class LangChainLLM(LLM):
 
 
 class QdrantLangChainRetriever(BaseRetriever):
-    """Adapter to use our existing QdrantRetriever inside LangChain."""
+    """Adapter that exposes `QdrantRetriever.search_text()` as a LangChain retriever.
+
+    This allows using the same underlying Qdrant collections with LangChain chains.
+    """
     def __init__(self, retriever: QdrantRetriever, top_k_text: int = 5):
         super().__init__()
         self._retriever = retriever
@@ -153,7 +159,16 @@ def build_langchain_rag_chain(
     retriever: Optional[QdrantRetriever] = None,
     top_k_text: int = 5
 ) -> RetrievalQA:
-    """Create a LangChain RetrievalQA chain using our components."""
+    """Build a LangChain `RetrievalQA` chain using project components.
+
+    Args:
+        llm_client: Optional pre-configured LLMClient for generation.
+        retriever: Optional QdrantRetriever instance.
+        top_k_text: Number of text chunks to retrieve per query.
+
+    Returns:
+        A `RetrievalQA` chain that pulls context from Qdrant and generates answers.
+    """
     llm_client = llm_client or LLMClient()
     lc_llm = LangChainLLM(llm_client)
     retriever = retriever or QdrantRetriever()
@@ -177,10 +192,14 @@ def build_langchain_rag_chain(
 
 
 class RAGPipeline:
-    """RAG pipeline for generating answers."""
-    
+    """High-level RAG pipeline that retrieves context and generates an answer."""
+
     def __init__(self):
-        """Initialize RAG pipeline."""
+        """Initialize retriever and LLM.
+
+        Note:
+            LLM loading can be expensive; instantiate once and reuse if possible.
+        """
         self.retriever = QdrantRetriever()
         self.llm = LLMClient()
     
@@ -192,15 +211,26 @@ class RAGPipeline:
         top_k_images: int = 3,
         query_image_path: Optional[str] = None
     ) -> Tuple[str, RetrievedContext]:
-        """Generate answer using RAG.
+        """Generate an answer using retrieval-augmented generation.
 
-        Contract:
-        - If prompt contains only text: context = text chunks for that text.
-        - If prompt contains an image: context = union of
-            (a) text chunks relevant to text part of prompt
-            (b) text chunks linked to nearest image point(s) in IMAGE_COLLECTION
-            (c) text chunks linked to the same image point(s) w/ caption injected into prompt
-          Duplicates are removed.
+        Behavior:
+        - Text-only query: retrieve `top_k_text` text chunks and answer based on them.
+        - Image-assisted query: retrieve similar images, then fetch linked text chunks
+          via LINK_COLLECTION, merge with text retrieval results, prefix relevant
+          captions as '[Image caption] ...' lines.
+
+        Args:
+            question: User question text.
+            chat_history: Optional chat history (currently not injected into the prompt).
+            top_k_text: Max number of text chunks to include in context.
+            top_k_images: Max number of similar images to retrieve.
+            query_image_path: Optional local path to a query image.
+
+        Returns:
+            (answer, RetrievedContext)
+
+        Logging:
+            Prompt contents are not logged; only metadata may be logged at DEBUG level.
         """
 
         system_prompt = (
@@ -336,18 +366,15 @@ class RAGPipeline:
         context_text = "\n\n".join(merged_text_chunks)
 
         # Remove the old separate captions_block and build prompt with just the context_text.
-        if chat_history:
-            history_text = "\n".join([
-                f"{msg.role}: {msg.content}"
-                for msg in chat_history[-5:]
-            ])
-            user_prompt = f"CONTEXT:\n{context_text}\n\nQUESTION: {question}\nANSWER:"
-            print("PROMPT: ", user_prompt)
-            answer = self.llm.generate(user_prompt, system_prompt=system_prompt)
-        else:
-            user_prompt = f"CONTEXT:\n{context_text}\n\nQUESTION: {question}\nANSWER:"
-            print("PROMPT: ", user_prompt)
-            answer = self.llm.generate(user_prompt, system_prompt=system_prompt)
+        user_prompt = f"CONTEXT:\n{context_text}\n\nQUESTION: {question}\nANSWER:"
+        logger.debug(
+            "Built prompt (len=%s). chat_history=%s; text_chunks=%s; images=%s",
+            len(user_prompt),
+            bool(chat_history),
+            len(merged_text_chunks),
+            len(retrieved_images),
+        )
+        answer = self.llm.generate(user_prompt, system_prompt=system_prompt)
 
         return answer, RetrievedContext(text_chunks=merged_text_chunks, images=retrieved_images)
 
@@ -360,7 +387,7 @@ if __name__ == "__main__":
         "RAG_DEMO_QUESTION",
         # "Who was Augustus?"
         # "What is Byzantine Empire?"
-        # "What was the fertility rate in Roman Egypt for ages 25–29?"
+        # "What was the fertility rate in Roman Egypt for ages 25\u201329?"
         "What can you say about this picture?"
     )
 
@@ -369,35 +396,34 @@ if __name__ == "__main__":
     # image_path = "../tests/data/images/colosseum.png"
     # image_path = None
 
-    print("Running RAG pipeline demo...\n")
+    logger.info("Running RAG pipeline demo")
 
     pipeline = RAGPipeline()
     answer, retrieved = pipeline.generate_answer(sample_question, query_image_path=image_path)
 
     # Optional: LangChain demo if desired
     if os.environ.get("RAG_USE_LANGCHAIN", "0") == "1":
-        print("\nRunning LangChain RetrievalQA demo...\n")
+        logger.info("Running LangChain RetrievalQA demo")
         lc_chain = build_langchain_rag_chain(top_k_text=5)
         lc_result = lc_chain.invoke({"query": sample_question})
-        print("LangChain answer:")
-        print(lc_result.get("result"))
+        logger.info("LangChain answer: %s", lc_result.get("result"))
 
-    print("Question:")
-    print(sample_question)
-    print("\nAnswer:")
-    print(answer)
+    logger.info("Question: %s", sample_question)
+    logger.info("Answer: %s", answer)
 
     # Briefly summarize retrieved context
-    print("\nRetrieved context summary:")
-    print(f"- Text chunks: {len(retrieved.text_chunks)}")
+    logger.info("Retrieved context summary: text_chunks=%s images=%s", len(retrieved.text_chunks), len(retrieved.images))
     if retrieved.text_chunks:
         preview = (retrieved.text_chunks[0] or "").strip().replace("\n", " ")
-        print(f"  First chunk preview: {preview[:200]}{'...' if len(preview) > 200 else ''}")
+        logger.debug("First chunk preview: %s", preview[:200])
 
-    print(f"\n- Images retrieved: {len(retrieved.images)}")
     if retrieved.images:
         for i, img in enumerate(retrieved.images, 1):
-            print(f"  [{i}] Title: {img.page_title or 'n/a'}")
-            print(f"      Caption: {(img.caption or 'No caption')[:100]}")
-            print(f"      Score: {img.score:.3f}")
-            print(f"      Path: {img.local_path or img.url or 'n/a'}")
+            logger.debug(
+                "Retrieved image[%s]: title=%s caption=%s score=%.3f path=%s",
+                i,
+                img.page_title or "n/a",
+                (img.caption or "No caption")[:100],
+                img.score,
+                img.local_path or img.url or "n/a",
+            )

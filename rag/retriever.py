@@ -1,4 +1,3 @@
-"""Vector database retriever."""
 import os
 
 from dotenv import load_dotenv
@@ -18,7 +17,13 @@ LINK_COLLECTION_NAME = os.getenv("LINK_COLLECTION_NAME", "chunk_image_links")
 
 
 class QdrantRetriever:
-    """Qdrant-based retriever for text and images."""
+    """Retrieve text chunks and images from Qdrant.
+
+    Collections and IDs:
+    - Text points are addressed by `chunk_id` (Qdrant point id).
+    - Image points are addressed by `image_id` (Qdrant point id).
+    - Link points are arbitrary; their payload ties together `text_chunk_id` and `image_id`.
+    """
 
     def __init__(self):
         """Initialize Qdrant client and collections."""
@@ -33,7 +38,8 @@ class QdrantRetriever:
         self._ensure_collections()
 
     def _ensure_collections(self):
-        """Create collections if they don't exist."""
+        """Create required Qdrant collections if they don't exist.
+        """
         # Text collection (384 dimensions for all-MiniLM-L6-v2)
         try:
             self.client.get_collection(TEXT_COLLECTION_NAME)
@@ -78,9 +84,6 @@ class QdrantRetriever:
         score_threshold: float = 0.5
     ) -> List[Tuple[str, float, dict, int]]:
         """Search for relevant text chunks.
-
-        Returns:
-            List of tuples (text, score, metadata, chunk_id)
         """
         query_vector = self.text_embedder.embed(query)[0]
 
@@ -107,11 +110,18 @@ class QdrantRetriever:
         top_k: int = 5,
         score_threshold: float = 0.5
     ) -> List[Tuple[dict, float]]:
-        """Search for similar images.
+        """Search for similar images using an image file as a query.
 
-        Returns a tuple (payload, score). The payload is augmented with `image_id`
-        equal to the Qdrant point id, so downstream code can reliably resolve
-        image↔chunk links.
+        Args:
+            query_image_path: Local image path to embed and search by.
+            top_k: Maximum number of points to return.
+            score_threshold: Qdrant score threshold.
+
+        Returns:
+            List of tuples (payload, score).
+
+            The returned payload is always augmented with `image_id` equal to the
+            Qdrant point id (if not already present in payload).
         """
         query_vector = self.image_embedder.embed(query_image_path)[0]
 
@@ -146,9 +156,10 @@ class QdrantRetriever:
         top_k: int = 5,
         score_threshold: float = 0.3
     ) -> List[Tuple[dict, float]]:
-        """Search for images using a text query by embedding the text with OpenCLIP.
+        """Search images by embedding the *text query*.
 
-        Payload is augmented with `image_id` equal to the Qdrant point id.
+        Returns:
+            List of (payload, score) where payload includes `image_id`.
         """
         query_vector = self.image_embedder.embed_text(query)[0]
 
@@ -172,11 +183,23 @@ class QdrantRetriever:
         self,
         text_chunk_id: int
     ) -> List[dict]:
-        """Retrieve images associated with a specific text chunk ID.
+        """Return images linked to a given text chunk.
 
-        Uses the LINK_COLLECTION to resolve chunk -> image ids, then retrieves image payloads.
-        Each returned image payload is augmented with link-specific fields (caption, section info)
-        from the link records.
+        This is a two-step lookup:
+        1) Filter LINK_COLLECTION by payload.text_chunk_id
+        2) Retrieve image points by the linked payload.image_id values
+
+        The returned list contains image payload dicts augmented with relationship
+        fields copied from the corresponding link payload when present:
+        - caption
+        - section_title/section_path/section_level
+        - page_title/page_url
+
+        Args:
+            text_chunk_id: Text chunk point id in TEXT_COLLECTION.
+
+        Returns:
+            List of image payload dictionaries.
         """
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
@@ -230,7 +253,7 @@ class QdrantRetriever:
         return out
 
     def get_text_chunk_ids_by_image_id(self, image_id: int) -> List[int]:
-        """Return all text chunk ids that reference the given image id (via links collection)."""
+        """Return all text chunk ids linked to a given image id."""
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
         link_points, _ = self.client.scroll(
@@ -257,10 +280,23 @@ class QdrantRetriever:
         links: List[dict],
         ids: Optional[List[int]] = None
     ):
-        """Upsert chunk-image link records into LINK_COLLECTION.
+        """Upsert chunk-image link dicts into LINK_COLLECTION.
 
-        Each link dict should include: text_chunk_id, image_id and may include caption,
-        page/section fields.
+        Link payload schema (minimum):
+            {
+              'text_chunk_id': int,   # TEXT_COLLECTION point id
+              'image_id': int,        # IMAGE_COLLECTION point id
+              'caption': str,         # optional; relationship-level
+              'page_title': str,
+              'page_url': str,
+              'section_title': str,
+              'section_path': str,
+              'section_level': int,
+            }
+
+        Args:
+            links: List of link payload dicts.
+            ids: Optional explicit point ids for link points (defaults to enumerate()).
         """
         points = [
             PointStruct(
@@ -282,28 +318,16 @@ class QdrantRetriever:
         metadata: List[dict],
         ids: Optional[List[int]] = None
     ):
-        """Add text chunks to the collection."""
-        # embeddings = self.text_embedder.embed(texts)
-        #
-        # points = [
-        #     PointStruct(
-        #         id=ids[i] if ids else i,
-        #         vector=embeddings[i].tolist(),
-        #         payload={
-        #             "text": texts[i],
-        #             **metadata[i]
-        #         }
-        #     )
-        #     for i in range(len(texts))
-        # ]
-        #
-        # # try:
-        # self.client.upsert(
-        #     collection_name=TEXT_COLLECTION_NAME,
-        #     points=points
-        # )
-        # # except Exception as e:
-        # #     print(f"Error upserting text chunks: {e}")
+        """Upsert text chunks into TEXT_COLLECTION.
+
+        Args:
+            texts: List of chunk texts.
+            metadata: List of metadata dicts aligned 1:1 with texts.
+            ids: Optional explicit Qdrant point ids.
+
+        Notes:
+            Performs simple batching with retry/backoff.
+        """
         embeddings = self.text_embedder.embed(texts)
 
         points = [
@@ -344,7 +368,13 @@ class QdrantRetriever:
         metadata: List[dict],
         ids: Optional[List[int]] = None
     ):
-        """Add images to the collection."""
+        """Upsert images into IMAGE_COLLECTION.
+
+        Args:
+            image_paths: Local paths to images.
+            metadata: List of metadata dicts aligned 1:1 with image_paths.
+            ids: Optional explicit Qdrant point ids.
+        """
         embeddings = self.image_embedder.embed(image_paths)
 
         points = [
@@ -368,7 +398,11 @@ class QdrantRetriever:
         self,
         chunk_id: int
     ) -> Optional[Tuple[str, dict]]:
-        """Retrieve a specific text chunk by its ID."""
+        """Return a single text chunk by id.
+
+        Returns:
+            (text, metadata) or None if the point doesn't exist.
+        """
         points = self.client.retrieve(
             collection_name=TEXT_COLLECTION_NAME,
             ids=[chunk_id],
@@ -381,9 +415,9 @@ class QdrantRetriever:
         return None
 
     def get_links_by_image_id(self, image_id: int, limit: int = 50) -> List[dict]:
-        """Return link payloads for a given image id.
+        """Return link payload dicts for a given image id.
 
-        Link payloads include relationship-level metadata like caption, section path, and
+        Link payloads contain relationship-level fields such as caption and
         text_chunk_id.
         """
         from qdrant_client.models import Filter, FieldCondition, MatchValue

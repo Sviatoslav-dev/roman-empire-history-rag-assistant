@@ -20,6 +20,32 @@ class WikipediaArticleFilter:
     MIN_ARTICLE_LENGTH = 2000  # Minimum number of characters in the articles
     MIN_ARTICLE_CITATIONS = 3  # Minimum number of citations in the articles
 
+    # License/keyword snippets that indicate an image is likely restricted or unclear.
+    # Matching is done against the stored licence string.
+    LICENSE_FORBIDDEN_TRIGGERS: tuple[str, ...] = (
+        # clearly non-free / restricted
+        "fair use",
+        "fair",
+        "non free",
+        "nonfree",
+        "copyright",
+        "all rights reserved",
+        "noncommercial",
+        "no derivatives",
+        "nc",
+        "nd",
+
+        # ambiguous / not a specific reusable licence label (exclude by default)
+        "attribution",
+        "no restrictions",
+        "copyrighted free use",
+
+        # licences/labels that require extra obligations or are unclear for images (exclude by default)
+        "gfdl",
+        "lgpl",
+        "fal",
+    )
+
     def filter_articles(self, articles: List[WikipediaArticleScraper]) -> List[WikipediaArticleScraper]:
         """Filter article scrapers using quality criteria.
 
@@ -76,31 +102,7 @@ class WikipediaArticleFilter:
 
         tokens = set(license.split())
 
-        forbidden_triggers: tuple[str, ...] = (
-            # clearly non-free / restricted
-            "fair use",
-            "fair",
-            "non free",
-            "nonfree",
-            "copyright",
-            "all rights reserved",
-            "noncommercial",
-            "no derivatives",
-            "nc",
-            "nd",
-
-            # ambiguous / not a specific reusable licence label (exclude by default)
-            "attribution",
-            "no restrictions",
-            "copyrighted free use",
-
-            # licences/labels that require extra obligations or are unclear for images (exclude by default)
-            "gfdl",
-            "lgpl",
-            "fal",
-        )
-
-        for trigger in forbidden_triggers:
+        for trigger in self.LICENSE_FORBIDDEN_TRIGGERS:
             if " " in trigger:
                 if trigger in license:
                     return False

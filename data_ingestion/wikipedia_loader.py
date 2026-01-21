@@ -55,13 +55,14 @@ class WikipediaLoader:
 
             # Progressive persistence: create DB records as soon as titles are discovered.
             for url in discovered:
+                title = None
                 try:
                     title = unquote(url).replace("/wiki/", "")
                     _meta.upsert_article_title(title)
                     _meta.update_article_url(title, url)
                     articles.add(url)
                 except Exception:
-                    logger.exception("Failed to upsert article title into PostgreSQL: %s", title)
+                    logger.exception("Failed to upsert article title into PostgreSQL: %s", title or url)
 
         return articles
 
@@ -69,7 +70,7 @@ class WikipediaLoader:
         """Download multiple Wikipedia articles as HTML files into `ARTICLES_DIR`.
 
         Args:
-            titles: A set of article titles to fetch.
+            urls: A set of Wikipedia article URLs ("/wiki/..." form).
 
         Returns:
             A list of downloaded page HTML contents (strings).
@@ -132,7 +133,7 @@ class WikipediaLoader:
     def download_images(self, images: List[WikipediaImage]):
         """Download images and persist metadata incrementally."""
         for image in tqdm(images, desc="Downloading images"):
-            print("Processing image URL:", image.url)
+            logger.debug("Processing image URL: %s", image.url)
 
             image.normalize_url()
 
@@ -145,7 +146,7 @@ class WikipediaLoader:
             image_title = image.get_filename()
 
             if _storage.image_exists(image_title):
-                print(f"image {image_title} already exists")
+                logger.info("Image already exists locally, skipping: %s", image_title)
                 continue
 
             filepath = _storage.image_filepath(image_title)

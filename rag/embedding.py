@@ -9,16 +9,20 @@ from PIL import Image
 import numpy as np
 from typing import List, Union
 
+from logger import get_logger
+
 load_dotenv()
+
+logger = get_logger(__name__)
 
 TEXT_EMBEDDING_MODEL = os.getenv("TEXT_EMBEDDING_MODEL")
 IMAGE_EMBEDDING_MODEL = os.getenv("IMAGE_EMBEDDING_MODEL")
 
 class TextEmbedder:
     """Text embedding model using sentence-transformers."""
-    
+
     def __init__(self, model_name: str = None):
-        """Initialize text embedder."""
+        """Create the embedder."""
         model_name = model_name or TEXT_EMBEDDING_MODEL
         self.model = SentenceTransformer(model_name)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -38,10 +42,17 @@ class TextEmbedder:
 
 
 class ImageEmbedder:
-    """Image embedding model using OpenCLIP."""
-    
+    """Image embedding model using OpenCLIP.
+
+    Embeddings are L2-normalized to work well with cosine similarity in Qdrant.
+    """
+
     def __init__(self, model_name: str = None):
-        """Initialize image embedder."""
+        """Create the embedder.
+
+        Args:
+            model_name: OpenCLIP model name. Defaults to IMAGE_EMBEDDING_MODEL env var.
+        """
         model_name = model_name or IMAGE_EMBEDDING_MODEL
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             model_name,
@@ -53,7 +64,11 @@ class ImageEmbedder:
         self.model.eval()
     
     def embed(self, image_paths: Union[str, List[str]]) -> np.ndarray:
-        """Generate embeddings for image(s)."""
+        """Generate embeddings for image(s).
+
+        Returns a zero-vector for images that can't be processed (e.g. unsupported
+        formats like SVG).
+        """
         if isinstance(image_paths, str):
             image_paths = [image_paths]
         
@@ -67,8 +82,8 @@ class ImageEmbedder:
                     # Normalize embeddings
                     image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                     embeddings.append(image_features.cpu().numpy().flatten())
-                except Exception as e:  # TODO: convert svg to another format
-                    print(f"Error processing image {image_path}: {e}")
+                except Exception:
+                    logger.warning("Failed to process image for embedding: %s", image_path, exc_info=True)
                     # Return zero vector if image can't be processed
                     embeddings.append(np.zeros(512))
         

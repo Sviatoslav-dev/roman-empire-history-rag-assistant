@@ -16,19 +16,7 @@ logger = get_logger(__name__)
 
 @dataclass(slots=True)
 class ChunkIngestionPipeline:
-    """Pipeline that owns `ArticleChunk`s and prepares them for Qdrant.
-
-    Responsibilities:
-    - keep chunks as state (`self.chunks`)
-    - download images referenced by chunks
-    - post-process downloaded images (SVG -> PNG)
-    - filter chunk image mentions by license
-    - build Qdrant payloads: text chunks, unique images, and chunk-image links
-
-    Notes:
-    - This class does not talk to Qdrant directly; it only prepares payloads.
-    - Qdrant payloads stay dict-based (storage boundary).
-    """
+    """Pipeline that owns `ArticleChunk`s and prepares them for Qdrant."""
 
     loader: WikipediaLoader
     article_filter: WikipediaArticleFilter
@@ -39,9 +27,6 @@ class ChunkIngestionPipeline:
 
     IMAGE_ID_START: int = 1_000_000
 
-    # def set_chunks(self, chunks: List[ArticleChunk]) -> None:
-    #     self.chunks = list(chunks)
-
     def split_articles_into_chunks(self, articles: List[WikipediaArticleScraper]) -> List[ArticleChunk]:
         """Split scraper objects into `ArticleChunk` instances."""
         chunks: List[ArticleChunk] = []
@@ -51,8 +36,8 @@ class ChunkIngestionPipeline:
         logger.info("Total article chunks created: %d", len(chunks))
         return chunks
 
-
     def extend_chunks(self, chunks: List[ArticleChunk]) -> None:
+        """Append additional chunks to the internal chunk list."""
         self.chunks.extend(chunks)
 
     def download_images(self) -> None:
@@ -70,10 +55,18 @@ class ChunkIngestionPipeline:
         self.chunks = self.article_filter.filter_chunk_images(self.chunks)
 
     def prepare_text_collection(self) -> tuple[List[str], List[Dict]]:
-        """Prepare payload for the TEXT collection.
+        """Build inputs for upserting TEXT_COLLECTION.
 
         Returns:
             (chunk_texts, chunk_metadata)
+
+            - chunk_texts: List[str] where each entry is a chunk's finalized text.
+            - chunk_metadata: List[dict] aligned 1:1 with chunk_texts. Keys:
+                page_title, page_url, section_title, section_path, section_level.
+
+        Notes:
+            The Qdrant point id for each text chunk is typically the enumerate() index
+            in `self.chunks` at upsert time (unless overridden by caller).
         """
         chunk_texts = [c.text for c in self.chunks]
         chunk_metadata: List[Dict] = [
@@ -89,14 +82,20 @@ class ChunkIngestionPipeline:
         return chunk_texts, chunk_metadata
 
     def prepare_images_collection(self) -> tuple[Dict[str, Dict], List[str], List[Dict], List[int]]:
-        """Prepare payload for the IMAGE collection.
+        """Build inputs for upserting IMAGE_COLLECTION.
 
         Returns:
             (unique_images_by_url, image_paths, image_metadata, image_ids)
 
+            - unique_images_by_url: dict[url -> record] where record contains:
+                image_id (int), image_url (str), local_path (str)
+            - image_paths: List[str] local paths aligned with image_ids
+            - image_metadata: List[dict] aligned with image_paths; keys: image_url, local_path
+            - image_ids: List[int] stable ids for this run (starting at IMAGE_ID_START)
+
         Notes:
             - Unique images are deduplicated by normalized URL.
-            - IDs are deterministic within this run, starting from IMAGE_ID_START.
+            - Image local_path is read from PostgreSQL metadata store.
         """
         unique_images: Dict[str, Dict] = {}
         next_image_id = self.IMAGE_ID_START
@@ -130,13 +129,22 @@ class ChunkIngestionPipeline:
         return unique_images, image_paths, image_metadata, image_ids
 
     def prepare_link_collection(self, unique_images_by_url: Dict[str, Dict]) -> List[Dict]:
-        """Prepare payload for the LINK collection.
+        """Build relationship payloads for LINK_COLLECTION.
 
         Args:
-            unique_images_by_url: Mapping from image_url -> {image_id, ...}.
+            unique_images_by_url: Mapping from image_url -> record {image_id, ...} returned
+                by :meth:`prepare_images_collection`.
 
         Returns:
-            List of link records connecting text_chunk_id to image_id.
+            List of dict records. Each dict has at minimum:
+              - text_chunk_id: int (typically enumerate index of `self.chunks`)
+              - image_id: int (from unique_images_by_url)
+              - caption: str (may be empty)
+              - page_title/page_url/section_title/section_path/section_level
+
+        Notes:
+            LINK_COLLECTION records store relationship-level metadata (caption, section),
+            not on the image points themselves.
         """
         links: List[Dict] = []
 
