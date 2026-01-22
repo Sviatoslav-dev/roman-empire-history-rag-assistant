@@ -610,7 +610,7 @@ class WikipediaArticleScraper(BasePageScraper):
 
         return f"{key}: {value_text}"
 
-    def _infobox_maybe_extract_image(self, row, chunks: ArticleChunk) -> bool:
+    def _infobox_maybe_extract_image(self, row, chunk: ArticleChunk) -> bool:
         """Extract an <img> inside an infobox row, if present."""
         img = row.select_one("img")
         if not img:
@@ -624,5 +624,5 @@ class WikipediaArticleScraper(BasePageScraper):
         wiki_image.normalize_url()
 
         caption = " ".join(row.get_text().split())
-        chunks.images.append(ChunkImageMention(image=wiki_image, caption=caption))
+        chunk.images.append(ChunkImageMention(image=wiki_image, caption=caption))
         return True
