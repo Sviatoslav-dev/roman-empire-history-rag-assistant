@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,9 +26,9 @@ class WikipediaImage:
         base_url, thumb_path = parts
         segments = thumb_path.split("/")
 
-        # Expected structure:
+        # Updates structure from:
         #   hash1/hash2/filename/220px-filename
-        # We need:
+        # To:
         #   hash1/hash2/filename
         if len(segments) >= 3:
             self.url = f"{base_url}/{'/'.join(segments[:-1])}"

@@ -1,12 +1,3 @@
-"""LangChain adapters for project components.
-
-This module is optional: it exists to let you reuse the project's Qdrant
-collections with LangChain chains, without coupling LangChain to the core
-pipeline.
-"""
-
-from __future__ import annotations
-
 from typing import Any, List, Optional
 
 from langchain.chains.retrieval_qa.base import RetrievalQA

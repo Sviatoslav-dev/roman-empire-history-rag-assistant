@@ -1,11 +1,3 @@
-"""Prompt templates used by the RAG pipeline.
-
-Keeping prompts in one place makes it easier to iterate on them independently
-from retrieval and orchestration logic.
-"""
-
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 

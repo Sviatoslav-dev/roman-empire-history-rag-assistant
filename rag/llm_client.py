@@ -1,12 +1,3 @@
-"""LLM client utilities.
-
-This module wraps `llama-cpp-python` to provide a small, project-specific API.
-Keeping it separate from the RAG orchestration makes the pipeline easier to
-maintain and test.
-"""
-
-from __future__ import annotations
-
 import os
 from pathlib import Path
 from typing import Optional

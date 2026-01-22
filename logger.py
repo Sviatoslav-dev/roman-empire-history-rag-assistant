@@ -1,10 +1,3 @@
-"""Project-wide logger factory.
-
-Place a single small module at project root so other modules can import
-get_logger and obtain a preconfigured logger. Respects LOG_LEVEL env var.
-"""
-from __future__ import annotations
-
 import logging
 import os
 from typing import Optional
