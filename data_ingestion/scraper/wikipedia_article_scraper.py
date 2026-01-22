@@ -184,7 +184,7 @@ class WikipediaArticleScraper(BasePageScraper):
                 continue
 
             # A) Section heading
-            if (next_chunk := self._maybe_start_new_section(el, heading_stack, current_chunk, chunks)) is not None:
+            if (next_chunk := self._maybe_start_new_chunk(el, heading_stack, current_chunk, chunks)) is not None:
                 current_chunk = next_chunk
                 continue
 
@@ -247,7 +247,7 @@ class WikipediaArticleScraper(BasePageScraper):
 
         chunks.append(chunk)
 
-    def _maybe_start_new_section(
+    def _maybe_start_new_chunk(
         self,
         el: Tag,
         heading_stack: List[tuple[int, str]],
@@ -347,9 +347,11 @@ class WikipediaArticleScraper(BasePageScraper):
                 logger.debug("Infobox extracted for '%s' / section '%s'", self.title, current_chunk.section_path)
             return
 
-        table_json = self._extract_table_generic_json(el, current_chunk)
-        if table_json:
-            current_chunk.text_parts.append(json.dumps(table_json, ensure_ascii=False))
+        table_data = self._extract_table_generic_json(el, current_chunk)
+        if table_data:
+            current_chunk.text_parts.append(table_data)
+
+
 
     def _handle_figure(self, el: Tag, current_chunk: ArticleChunk) -> None:
         """Extract a <figure> image and caption and attach it to the chunk."""
@@ -463,15 +465,12 @@ class WikipediaArticleScraper(BasePageScraper):
             bool(caption),
         )
 
-        return {
-            "table_context": {
-                "section": current_chunk.section_title,
-                "caption": caption,
-                "description": "Structured table extracted from HTML with hierarchical headers",
-                "columns": columns,
-                "rows": structured_rows,
-            }
+        table_data = {
+            "columns": columns,
+            "rows": structured_rows,
         }
+        return f"Table {caption}\n\n{json.dumps(table_data, ensure_ascii=False)}"
+
 
     def _table_extract_caption_and_rows(self, table) -> tuple[Optional[str], list]:
         """Return (caption_text, rows) where rows is a list of <tr> tags."""
@@ -611,7 +610,7 @@ class WikipediaArticleScraper(BasePageScraper):
 
         return f"{key}: {value_text}"
 
-    def _infobox_maybe_extract_image(self, row, section: ArticleChunk) -> bool:
+    def _infobox_maybe_extract_image(self, row, chunks: ArticleChunk) -> bool:
         """Extract an <img> inside an infobox row, if present."""
         img = row.select_one("img")
         if not img:
@@ -625,5 +624,5 @@ class WikipediaArticleScraper(BasePageScraper):
         wiki_image.normalize_url()
 
         caption = " ".join(row.get_text().split())
-        section.images.append(ChunkImageMention(image=wiki_image, caption=caption))
+        chunks.images.append(ChunkImageMention(image=wiki_image, caption=caption))
         return True
