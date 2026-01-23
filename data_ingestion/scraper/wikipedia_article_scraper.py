@@ -569,41 +569,6 @@ class WikipediaArticleScraper(BasePageScraper):
         """
         return " – ".join(h.strip() for h in hierarchy if h.strip())
 
-    def _table_classify_columns(
-            self,
-            structured_rows: list[dict],
-            columns: list[list[str]],
-    ) -> tuple[list[str], list[str]]:
-        """
-        Infer semantic types of table columns based on their cell values.
-
-        Classifies each column as 'numeric' or 'text' using value-level heuristics.
-        Returns a mapping: column_index -> column_type.
-        """
-        col_keys = [".".join(c) for c in columns]
-        numeric_ratio: dict[str, float] = {}
-
-        for key in col_keys:
-            values = [row.get(key, "") for row in structured_rows]
-            if not values:
-                numeric_ratio[key] = 0.0
-                continue
-
-            numeric_count = sum(
-                1 for v in values if self._is_numeric_like(v)
-            )
-            numeric_ratio[key] = numeric_count / len(values)
-
-        dimension_keys = []
-        metric_keys = []
-
-        for key, ratio in numeric_ratio.items():
-            if ratio >= 0.7:
-                metric_keys.append(key)
-            else:
-                dimension_keys.append(key)
-
-        return dimension_keys, metric_keys
 
     def _table_render_rows_text(
             self,
@@ -620,35 +585,17 @@ class WikipediaArticleScraper(BasePageScraper):
             for key, col in zip(col_keys, columns)
         }
 
-        dimension_keys, metric_keys = self._table_classify_columns(
-            structured_rows, columns
-        )
-
         row_texts: list[str] = []
 
         for row in structured_rows:
-            dimensions = []
-            metrics = []
+            values = []
 
-            for key in dimension_keys:
+            for key in row.keys():
                 val = row.get(key)
                 if val:
-                    dimensions.append(f"{col_names[key]}: {val}")
+                    values.append(f"{col_names[key]}: {val}")
 
-            for key in metric_keys:
-                val = row.get(key)
-                if val:
-                    metrics.append(f"{col_names[key]}: {val}")
-
-            if dimensions and metrics:
-                sentence = (
-                        " | ".join(dimensions)
-                        + ". "
-                        + ", ".join(metrics)
-                        + "."
-                )
-            else:
-                sentence = ", ".join(dimensions + metrics) + "."
+            sentence = ", ".join(values) + "."
 
             row_texts.append(sentence)
 
