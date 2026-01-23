@@ -1,4 +1,4 @@
-import json
+import re
 from typing import Optional, List
 
 from bs4 import Tag
@@ -7,6 +7,8 @@ from data_ingestion.scraper.base_page_scraper import BasePageScraper
 from data_ingestion.wikipedia_image import WikipediaImage
 from data_ingestion.chunk_models import ArticleChunk, ChunkImageMention
 from logger import get_logger
+
+NUMERIC_RE = re.compile(r"^[\d\.,–\-]+$")
 
 logger = get_logger(__name__)
 
@@ -343,11 +345,11 @@ class WikipediaArticleScraper(BasePageScraper):
         if "infobox" in class_str.lower():
             infobox_text = self._extract_infobox_data(el, current_chunk)
             if infobox_text:
-                current_chunk.text_parts.append(infobox_text)
+                current_chunk.text_parts.append(f"{self.title.replace('_', ' ')} infobox: \n\n {infobox_text}")
                 logger.debug("Infobox extracted for '%s' / section '%s'", self.title, current_chunk.section_path)
             return
 
-        table_data = self._extract_table_generic_json(el, current_chunk)
+        table_data = self._extract_table_generic_json(el)
         if table_data:
             current_chunk.text_parts.append(table_data)
 
@@ -438,39 +440,33 @@ class WikipediaArticleScraper(BasePageScraper):
 
         return src
 
-    def _extract_table_generic_json(self, table, current_chunk: ArticleChunk):
-        """Extract a generic HTML table into a structured JSON-like dict.
-
-        Output is appended as JSON text into the chunk and is intentionally storage-friendly.
-
-        The returned schema is kept stable because downstream uses store it as plain text.
+    def _extract_table_generic_json(self, table):
         """
+        Extract an HTML table into a stable, schema-agnostic text representation
+        suitable for semantic retrieval and storage.
+        """
+
         caption, rows = self._table_extract_caption_and_rows(table)
         if not rows:
             return None
 
         header_rows, data_rows = self._table_split_header_and_data(rows)
-        columns = self._table_build_column_hierarchies(header_rows)
+
+        if header_rows:
+            columns = self._table_build_column_hierarchies(header_rows)
+        else:
+            columns = self._table_build_fallback_columns(data_rows)
+
         if not columns:
             return None
 
         structured_rows = self._table_parse_data_rows(data_rows, columns)
 
-        logger.debug(
-            "Parsed table in '%s' / section '%s': cols=%d rows=%d (caption=%s)",
-            self.title,
-            current_chunk.section_path,
-            len(columns),
-            len(structured_rows),
-            bool(caption),
-        )
+        header_text = self._table_render_header_text(caption, columns)
+        row_texts = self._table_render_rows_text(structured_rows, columns)
 
-        table_data = {
-            "columns": columns,
-            "rows": structured_rows,
-        }
-        return f"Table {caption}\n\n{json.dumps(table_data, ensure_ascii=False)}"
-
+        table_text = "\n".join([header_text, ""] + row_texts)
+        return table_text
 
     def _table_extract_caption_and_rows(self, table) -> tuple[Optional[str], list]:
         """Return (caption_text, rows) where rows is a list of <tr> tags."""
@@ -554,6 +550,135 @@ class WikipediaArticleScraper(BasePageScraper):
             structured_rows.append(row_obj)
 
         return structured_rows
+
+    def _is_numeric_like(self, value: str) -> bool:
+        """
+        Check whether a cell value semantically represents a numeric value.
+
+        Returns True for integers, floats, percentages, ranges, or numbers with
+        formatting symbols; False for purely textual content.
+        """
+
+        if not value:
+            return False
+        return bool(NUMERIC_RE.match(value.replace(" ", "")))
+
+    def _table_normalize_column_name(self, hierarchy: list[str]) -> str:
+        """
+        Join hierarchical headers into a stable, human-readable column name.
+        """
+        return " – ".join(h.strip() for h in hierarchy if h.strip())
+
+    def _table_classify_columns(
+            self,
+            structured_rows: list[dict],
+            columns: list[list[str]],
+    ) -> tuple[list[str], list[str]]:
+        """
+        Infer semantic types of table columns based on their cell values.
+
+        Classifies each column as 'numeric' or 'text' using value-level heuristics.
+        Returns a mapping: column_index -> column_type.
+        """
+        col_keys = [".".join(c) for c in columns]
+        numeric_ratio: dict[str, float] = {}
+
+        for key in col_keys:
+            values = [row.get(key, "") for row in structured_rows]
+            if not values:
+                numeric_ratio[key] = 0.0
+                continue
+
+            numeric_count = sum(
+                1 for v in values if self._is_numeric_like(v)
+            )
+            numeric_ratio[key] = numeric_count / len(values)
+
+        dimension_keys = []
+        metric_keys = []
+
+        for key, ratio in numeric_ratio.items():
+            if ratio >= 0.7:
+                metric_keys.append(key)
+            else:
+                dimension_keys.append(key)
+
+        return dimension_keys, metric_keys
+
+    def _table_render_rows_text(
+            self,
+            structured_rows: list[dict],
+            columns: list[list[str]],
+    ) -> list[str]:
+        """
+        Render table rows as compact text preserving column–value meaning for retrieval.
+        """
+
+        col_keys = [".".join(c) for c in columns]
+        col_names = {
+            key: self._table_normalize_column_name(col)
+            for key, col in zip(col_keys, columns)
+        }
+
+        dimension_keys, metric_keys = self._table_classify_columns(
+            structured_rows, columns
+        )
+
+        row_texts: list[str] = []
+
+        for row in structured_rows:
+            dimensions = []
+            metrics = []
+
+            for key in dimension_keys:
+                val = row.get(key)
+                if val:
+                    dimensions.append(f"{col_names[key]}: {val}")
+
+            for key in metric_keys:
+                val = row.get(key)
+                if val:
+                    metrics.append(f"{col_names[key]}: {val}")
+
+            if dimensions and metrics:
+                sentence = (
+                        " | ".join(dimensions)
+                        + ". "
+                        + ", ".join(metrics)
+                        + "."
+                )
+            else:
+                sentence = ", ".join(dimensions + metrics) + "."
+
+            row_texts.append(sentence)
+
+        return row_texts
+
+    def _table_render_header_text(self, caption: str, columns: list[list[str]]) -> str:
+        """
+        Render table caption and column names as short semantic text.
+        """
+        lines = []
+
+        if caption:
+            lines.append(f"Table: {caption}.")
+
+        lines.append("Columns:")
+        for col in columns:
+            lines.append(f"- {self._table_normalize_column_name(col)}")
+
+        return "\n".join(lines)
+
+    def _table_build_fallback_columns(self, data_rows: list) -> list[list[str]]:
+        """
+        Build synthetic column hierarchies when table has no <th> headers.
+        """
+        if not data_rows:
+            return []
+
+        first_row = data_rows[0]
+        cells = first_row.find_all("td")
+        return [[f"col {i + 1}"] for i in range(len(cells))]
 
     def _extract_infobox_data(self, table, section: ArticleChunk) -> str:
         """Extract a Wikipedia infobox into readable key-value lines.
