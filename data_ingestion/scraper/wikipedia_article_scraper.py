@@ -462,7 +462,7 @@ class WikipediaArticleScraper(BasePageScraper):
         if not rows:
             return []
 
-        divider_tests, divider_indexes = self._table_extract_divide_rows(table) # TODO: typo
+        divider_texts, divider_indexes = self._table_extract_divide_rows(table) # TODO: typo
 
         header_rows, data_rows = self._table_split_header_and_data(rows)
 
@@ -482,7 +482,7 @@ class WikipediaArticleScraper(BasePageScraper):
         table_parts = [f"Table: {caption or chunk.section_title}.\n{header_text}\n"]
         for row_index, row in enumerate(row_texts):
             if not row and row_index in divider_indexes and row_index != 0 and row_index != len(row_texts) - 1:
-                table_part_title = divider_tests[divider_indexes.index(row_index)]
+                table_part_title = divider_texts[divider_indexes.index(row_index)]
                 new_part = f"\nContinuation of table: {caption or chunk.section_title}.{table_part_title}.\n{header_text}\n"
 
                 if not table_parts[-1].endswith("{header_text}\n"):
