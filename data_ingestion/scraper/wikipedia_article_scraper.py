@@ -462,7 +462,7 @@ class WikipediaArticleScraper(BasePageScraper):
         if not rows:
             return []
 
-        divider_texts, divider_indexes = self._table_extract_divide_rows(table) # TODO: typo
+        divider_texts, divider_indexes = self._table_extract_divide_rows(table)
 
         header_rows, data_rows = self._table_split_header_and_data(rows)
 
