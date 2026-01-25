@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Set
 from urllib.parse import unquote
 
@@ -18,7 +16,8 @@ class WikipediaCategoryScraper(BasePageScraper):
         articles: Set[str] = set()
         for group in self.soup.select("#mw-pages .mw-category-group"):
             for link in group.select("a[href^='/wiki/']"):
-                title = unquote(link["href"]).replace("/wiki/", "")
+                url = link["href"]
+                title = unquote(url).replace("/wiki/", "")
                 if ":" not in title:
-                    articles.add(title.replace("_", " "))
+                    articles.add(url)
         return articles

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Any
 from bs4 import BeautifulSoup
 
@@ -12,7 +10,7 @@ class BasePageScraper:
     for concrete scraper implementations.
     """
 
-    def __init__(self, html: str, title: str) -> None:
+    def __init__(self, html: str, title: str, url: str | None = None) -> None:
         """Initialize scraper with page HTML content.
 
         Args:
@@ -21,3 +19,4 @@ class BasePageScraper:
         """
         self.soup: Any = BeautifulSoup(html, "html.parser")
         self.title: str = title
+        self.url: str | None = url

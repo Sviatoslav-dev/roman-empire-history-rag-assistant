@@ -1,3 +1,5 @@
+langchain-core
+qdrant-client==1.16.2
 backend==0.2.4.1
 beautifulsoup4==4.14.3
 blinker==1.9.0
@@ -20,3 +22,14 @@ typing_extensions==4.15.0
 urllib3==2.6.2
 Werkzeug==3.1.4
 wikipedia==1.4.0
+
+# --- Added for images preprocessing ---
+pillow>=10.0.0
+cairosvg>=2.7.0
+
+# --- Added for LangChain-based pipeline and LLM ---
+langchain==0.3.10
+llama-cpp-python>=0.2.0  # For GGUF model support
+
+# --- Added for PostgreSQL driver ---
+psycopg[binary]>=3.2.0

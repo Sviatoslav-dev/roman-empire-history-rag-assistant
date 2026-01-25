@@ -1,47 +1,64 @@
+import hashlib
+import os
+from pathlib import Path
+import tempfile
 from typing import List
 from urllib.parse import unquote
 
-from config import ARTICLES_DIR
+from data_ingestion.pg_metadata_store import get_pg_metadata_store
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
+from data_ingestion.wikipedia_image import WikipediaImage
 from logger import get_logger
 
 logger = get_logger(__name__)
 
+ARTICLES_DIR = Path(os.getenv("ARTICLES_DIR", "./data/articles"))
+IMAGES_DIR = Path(os.getenv("IMAGES_DIR", "./data/images"))
 
 class WikipediaStorage:
     """Handles persistence of Wikipedia articles and related assets."""
 
     def get_downloaded_articles(self) -> List[WikipediaArticleScraper]:
-        """
-        Load saved Wikipedia article HTML files from `ARTICLES_DIR`
-        and return scraper instances for them.
+        """Load saved Wikipedia article HTML files referenced by PostgreSQL.
+
+        Reads rows from `ingestion_article` table (title/url/local_path), loads
+        HTML from `local_path` on disk, and returns scraper instances.
 
         Returns:
             A list of `WikipediaArticleScraper` instances constructed from saved
-            HTML files found in the `ARTICLES_DIR` directory.
+            HTML files.
         """
 
-        articles: List[WikipediaArticleScraper] = []
-
-        if not ARTICLES_DIR.exists() or not ARTICLES_DIR.is_dir():
-            logger.error("No valid articles directory provided.")
+        postgres = get_pg_metadata_store()
+        if not postgres.enabled:
+            logger.error("PostgreSQL metadata store is disabled; cannot load downloaded articles.")
             return []
 
-        for fp in sorted(ARTICLES_DIR.glob("*.html")):
+        articles: List[WikipediaArticleScraper] = []
+        rows = postgres.list_articles_with_local_path()
+        if not rows:
+            logger.warning("No ingestion articles with local_path found in PostgreSQL.")
+            return []
+
+        for row in rows:
+            fp = Path(row.local_path)
             if not fp.exists() or not fp.is_file():
-                logger.warning("Skipping non-file entry in articles dir: %s", fp)
+                logger.warning("Article HTML file missing on disk (title=%s): %s", row.title, fp)
                 continue
 
             try:
                 html = fp.read_text(encoding="utf-8")
-                title = fp.stem  # filename without extension
-                try:
-                    articles.append(WikipediaArticleScraper(html, title))
-                except Exception:
-                    logger.exception("Failed to construct scraper for file %s; skipping", fp)
-                    continue
             except Exception:
-                logger.exception("Error reading HTML file %s; skipping", fp)
+                logger.exception("Error reading article HTML file (title=%s): %s", row.title, fp)
+                continue
+
+            try:
+                scraper = WikipediaArticleScraper(html, row.title, row.url)
+                # Keep URL best-effort: WikipediaArticleScraper doesn't currently
+                # accept url in __init__, so we attach it if possible.
+                articles.append(scraper)
+            except Exception:
+                logger.exception("Failed to create WikipediaArticleScraper for title=%s", row.title)
                 continue
 
         return articles
@@ -52,22 +69,69 @@ class WikipediaStorage:
         file_path = ARTICLES_DIR / f"{safe_name}.html"
         return file_path.exists()
 
-    def save_article_to_file(self, title: str, html: str) -> None:
+    def _atomic_write_bytes(self, path: Path, data: bytes) -> None:
+        """Write bytes to `path` atomically (temp file + os.replace)."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=path.name, dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except Exception:
+                pass
+            raise
+
+    def _atomic_write_text(self, path: Path, text: str, *, encoding: str = "utf-8") -> None:
+        """Write text to `path` atomically (temp file + os.replace)."""
+        self._atomic_write_bytes(path, text.encode(encoding))
+
+    def save_article_to_file(self, title: str, html: str) -> Path:
         """Persist article HTML to the articles directory using a safe filename.
 
-        Args:
-            title: Article title used to generate the filename.
-            html: Raw HTML content to write to disk.
+        Returns:
+            The final file path written.
         """
         ARTICLES_DIR.mkdir(parents=True, exist_ok=True)
 
         filename = self.article_title_to_filename(title)
         file_path = ARTICLES_DIR / f"{filename}.html"
 
-        file_path.write_text(html, encoding="utf-8")
+        self._atomic_write_text(file_path, html, encoding="utf-8")
+        return file_path
+
+    def image_filepath(self, title: str) -> Path:
+        """Return the on-disk path where an image with the given filename should live."""
+        filename = self.image_title_to_filename(title)
+        filepath = IMAGES_DIR / filename
+        return filepath
+
+    def image_exists(self, title: str) -> bool:
+        """Return True if an image file already exists on disk."""
+        return self.image_filepath(title).exists()
 
     def article_title_to_filename(self, title: str) -> str:
         """Return a filesystem-safe filename (without extension) for a title."""
         safe_name = unquote(title).replace(" ", "_")
         safe_name = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in safe_name)
         return safe_name
+
+    def image_title_to_filename(self, title: str) -> str:
+        """Return a filesystem-safe filename (without extension) for an image title."""
+        max_length = 255
+
+        safe_name = unquote(title).replace(" ", "_")
+        safe_name = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in safe_name)
+        if max_length and len(safe_name) > max_length:
+            name, ext = os.path.splitext(safe_name)
+            h = hashlib.md5(safe_name.encode("utf-8")).hexdigest()[:8]
+            cut_len = max_length - len(ext) - len(h) - 1  # 1 for "_"
+            safe_name = f"{name[:cut_len]}_{h}{ext}"
+        return safe_name
+
+    def _extract_image_filename(self, image_url: str) -> str:
+        return WikipediaImage(image_url).get_filename()
