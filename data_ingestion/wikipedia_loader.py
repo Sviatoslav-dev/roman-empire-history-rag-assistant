@@ -90,27 +90,38 @@ class WikipediaLoader:
                 time.sleep(self.RATE_LIMIT_DELAY)
                 continue
 
-            _storage.save_article_to_file(title, page_html)
-
             try:
-                file_path = ARTICLES_DIR / f"{_storage.article_title_to_filename(title)}.html"
-                _postgres.update_article_local_path(title, str(file_path))
+                file_path = _storage.save_article_to_file(title, page_html)
             except Exception:
-                logger.exception("Failed to update article local_path in PostgreSQL: %s", title)
+                logger.exception("Failed to write article HTML to disk: %s", title)
+                time.sleep(self.RATE_LIMIT_DELAY)
+                continue
 
-            article = WikipediaArticleScraper(page_html, title, url)
+            # Only persist local_path if the file exists on disk.
+            if file_path.exists() and file_path.is_file() and file_path.stat().st_size > 0:
+                try:
+                    _postgres.update_article_local_path(title, str(file_path))
+                except Exception:
+                    logger.exception("Failed to update article local_path in PostgreSQL: %s", title)
+            else:
+                logger.warning("Article file did not materialize on disk (title=%s): %s", title, file_path)
+                time.sleep(self.RATE_LIMIT_DELAY)
+                continue
 
-            visible_text = article._get_visible_text()
-            quality = ArticleQuality(
-                symbols_number=len(visible_text),
-                citations_number=article.count_citations(),
-                has_problem_or_update_box=article.has_problem_or_update_box(),
-                is_english_available=article.is_english_article(),
-            )
+            # Quality metrics are best-effort; failure should not break ingestion.
             try:
+                article = WikipediaArticleScraper(page_html, title, url)
+
+                visible_text = article._get_visible_text()
+                quality = ArticleQuality(
+                    symbols_number=len(visible_text),
+                    citations_number=article.count_citations(),
+                    has_problem_or_update_box=article.has_problem_or_update_box(),
+                    is_english_available=article.is_english_article(),
+                )
                 _postgres.update_article_quality(title, quality)
             except Exception:
-                logger.exception("Failed to persist article quality metrics: %s", article.title)
+                logger.exception("Failed to compute/persist article quality metrics: %s", title)
 
             pages.append(page_html)
 
@@ -131,7 +142,11 @@ class WikipediaLoader:
 
 
     def download_images(self, images: List[WikipediaImage]) -> None:
-        """Download images and persist metadata incrementally."""
+        """Download images and persist metadata incrementally.
+
+        DB updates are best-effort, but we only write `local_path` when the file is
+        confirmed to exist on disk.
+        """
         for image in tqdm(images, desc="Downloading images"):
             logger.debug("Processing image URL: %s", image.url)
 
@@ -151,22 +166,36 @@ class WikipediaLoader:
 
             filepath = _storage.image_filepath(image_title)
 
+            try:
+                _wikipedia_client.download_image(image.url, filepath)
+            except Exception:
+                logger.exception("Failed to download image: %s", image.url)
+                time.sleep(0.5)
+                continue
 
-            _wikipedia_client.download_image(image.url, filepath)
+            # Only mark local_path when download succeeded.
+            if not (filepath.exists() and filepath.is_file() and filepath.stat().st_size > 0):
+                logger.warning("Downloaded image missing/empty on disk (url=%s): %s", image.url, filepath)
+                time.sleep(0.5)
+                continue
+
             image.local_path = filepath
 
-            extmetadata = _wikipedia_client.get_image_license(image_title)
             licence_name = None
-            if extmetadata:
-                licence_name = (extmetadata.get("LicenseShortName") or {}).get("value")
+            try:
+                extmetadata = _wikipedia_client.get_image_license(image_title)
+                if extmetadata:
+                    licence_name = (extmetadata.get("LicenseShortName") or {}).get("value")
+            except Exception:
+                logger.exception("Failed to fetch image licence metadata (filename=%s)", image_title)
 
             try:
                 _postgres.update_image_metadata(
                     url=image.url,
                     local_path=str(filepath),
                     filename=filepath.name,
-                    extension=filepath.suffix.lstrip(".") or None,
-                    licence=licence_name
+                    extension=filepath.suffix or None,
+                    licence=licence_name,
                 )
             except Exception:
                 logger.exception("Failed to update downloaded image metadata in PostgreSQL: %s", image.url)

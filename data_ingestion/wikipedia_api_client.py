@@ -3,6 +3,7 @@ from typing import Optional
 
 import time
 from pathlib import Path
+import tempfile
 
 import requests
 
@@ -107,12 +108,12 @@ class WikipediaApiClient:
         return page["imageinfo"][0]["extmetadata"]
 
     def download_image(self, image_url: str, filepath: Path) -> str | requests.Response:
-        response = requests.get(image_url, headers=self.HEADERS, timeout=30)
+        response = requests.get(image_url, headers=self.HEADERS, timeout=30, stream=True)
 
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After", "60")
             time.sleep(int(retry_after))
-            response = requests.get(image_url, headers=self.HEADERS, timeout=30)
+            response = requests.get(image_url, headers=self.HEADERS, timeout=30, stream=True)
             response.raise_for_status()
 
         if response.status_code == 200:
@@ -121,13 +122,24 @@ class WikipediaApiClient:
             content_length = response.headers.get("content-length", "0")
             # Accept if it's an image or has content
             if "image" in content_type or (content_length and int(content_length) > 0):
-                # Write the image using streaming
                 filepath.parent.mkdir(parents=True, exist_ok=True)
-                with open(filepath, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                return str(filepath)
+
+                fd, tmp_name = tempfile.mkstemp(prefix=filepath.name, dir=str(filepath.parent))
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp_name, filepath)
+                    return str(filepath)
+                except Exception:
+                    try:
+                        os.unlink(tmp_name)
+                    except Exception:
+                        pass
+                    raise
             else:
                 logger.warning(
                     "URL returned non-image content: url=%s content_type=%s content_length=%s",
