@@ -3,7 +3,7 @@ from typing import List
 
 from dotenv import load_dotenv
 
-from data_ingestion.chunk_ingestion import ChunkIngestionPipeline
+from data_ingestion.chunk_processor import ChunkProcessor
 from data_ingestion.pg_metadata_store import get_pg_metadata_store
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper
 from data_ingestion.wikipedia_article_filter import WikipediaArticleFilter
@@ -25,7 +25,7 @@ class WikipediaCollector:
     This class is responsible for fetching and filtering Wikipedia articles.
 
     Chunk/image processing and payload preparation are delegated to
-    `ChunkIngestionPipeline`.
+    `ChunkProcessor`.
     """
 
     def __init__(self, wikipedia_loader: WikipediaLoader, wikipedia_storage: WikipediaStorage) -> None:
@@ -33,7 +33,7 @@ class WikipediaCollector:
         self.storage = wikipedia_storage
         self.retriever = QdrantRetriever()
 
-        self.chunk_pipeline = ChunkIngestionPipeline(
+        self.chunk_processor = ChunkProcessor(
             loader=self.loader,
             article_filter=_article_filter,
             metadata_store=_postgres,
@@ -66,16 +66,16 @@ class WikipediaCollector:
             len(failed),
         )
 
-        self.chunk_pipeline.split_articles_into_chunks(filtered_articles)
+        self.chunk_processor.split_articles_into_chunks(filtered_articles)
 
         # Delegate chunk/image preparation
-        self.chunk_pipeline.download_images()
-        self.chunk_pipeline.postprocess_images()
-        self.chunk_pipeline.filter_images_by_license()
+        self.chunk_processor.download_images()
+        self.chunk_processor.postprocess_images()
+        self.chunk_processor.filter_images_by_license()
 
-        chunk_texts, chunk_metadata = self.chunk_pipeline.prepare_text_collection()
-        unique_images_by_url, image_paths, image_metadata, image_ids = self.chunk_pipeline.prepare_images_collection()
-        links = self.chunk_pipeline.prepare_link_collection(unique_images_by_url)
+        chunk_texts, chunk_metadata = self.chunk_processor.prepare_text_collection()
+        unique_images_by_url, image_paths, image_metadata, image_ids = self.chunk_processor.prepare_images_collection()
+        links = self.chunk_processor.prepare_link_collection(unique_images_by_url)
 
         # Upsert text chunks
         self.retriever.add_text_chunks(
@@ -86,7 +86,12 @@ class WikipediaCollector:
 
         # Upsert images
         if image_paths:
-            self.retriever.add_images(image_paths, image_metadata, ids=image_ids)
+            try:
+                image_ids_int = [int(x) for x in image_ids]
+                self.retriever.add_images(image_paths, image_metadata, ids=image_ids_int)
+            except Exception:
+                # Fall back to passing ids through if they aren't numeric.
+                self.retriever.add_images(image_paths, image_metadata, ids=image_ids)  # type: ignore[arg-type]
 
         # Upsert links
         if links:
