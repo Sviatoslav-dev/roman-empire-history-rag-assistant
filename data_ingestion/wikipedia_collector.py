@@ -28,16 +28,19 @@ class WikipediaCollector:
     `ChunkProcessor`.
     """
 
-    def __init__(self, wikipedia_loader: WikipediaLoader, wikipedia_storage: WikipediaStorage) -> None:
+    retriever: QdrantRetriever
+
+    def __init__(
+        self,
+        wikipedia_loader: WikipediaLoader,
+        wikipedia_storage: WikipediaStorage,
+        chunk_processor: ChunkProcessor,
+        retriever: QdrantRetriever | None = None,
+    ) -> None:
         self.loader = wikipedia_loader
         self.storage = wikipedia_storage
-        self.retriever = QdrantRetriever()
-
-        self.chunk_processor = ChunkProcessor(
-            loader=self.loader,
-            article_filter=_article_filter,
-            metadata_store=_postgres,
-        )
+        self.chunk_processor = chunk_processor
+        self.retriever = retriever
 
     def collect_articles(self, categories_file: str) -> List[WikipediaArticleScraper]:
         """Collect, process, and ingest Wikipedia articles discovered from categories."""
@@ -116,7 +119,13 @@ if __name__ == "__main__":
 
     loader = WikipediaLoader()
     storage = WikipediaStorage()
-    collector = WikipediaCollector(loader, storage)
+    retriever = QdrantRetriever()
+    chunk_processor = ChunkProcessor(
+        loader=loader,
+        article_filter=_article_filter,
+        metadata_store=_postgres,
+    )
+    collector = WikipediaCollector(loader, storage, chunk_processor, retriever)
     articles = collector.collect_articles(args.categories_file)
 
     if articles:
