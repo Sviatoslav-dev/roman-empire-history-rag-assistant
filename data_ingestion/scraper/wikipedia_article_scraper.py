@@ -1,6 +1,5 @@
 import re
-from logging import exception
-from typing import Optional, List, Tuple
+from typing import Optional, List
 
 from bs4 import Tag
 
@@ -259,10 +258,11 @@ class WikipediaArticleScraper(BasePageScraper):
     ) -> Optional[ArticleChunk]:
         """If `el` contains a heading, close current chunk and start a new one."""
         h = el.find(["h2", "h3", "h4", "h5", "h6"])
-        if not h:
+        h_name = getattr(h, "name", None)
+        if not h or not isinstance(h_name, str):
             return None
 
-        level = int(h.name[1])
+        level = int(h_name[1])
         title_text = " ".join(h.get_text().split())
         if not title_text:
             return None
@@ -351,10 +351,8 @@ class WikipediaArticleScraper(BasePageScraper):
 
         table_parts = self._extract_table_generic_json(el, max_chunk_size, current_chunk)
         if len(table_parts) == 1:
-            print("TABLE_ONE_CHUNK: ", f"https://en.wikipedia.org{self.url}")
             current_chunk.text_parts.append(table_parts[0])
         else:
-            print("TABLE_SPLITTED: ", f"https://en.wikipedia.org{self.url}")
             for table_part in table_parts:
                 self._finalize_and_append(current_chunk, chunks)
                 current_chunk = self._new_chunk(
@@ -462,7 +460,7 @@ class WikipediaArticleScraper(BasePageScraper):
         if not rows:
             return []
 
-        divider_texts, divider_indexes = self._table_extract_divide_rows(table)
+        divider_texts, divider_indexes = self._table_extract_table_parts_dividers(table)
 
         header_rows, data_rows = self._table_split_header_and_data(rows)
 
@@ -497,16 +495,33 @@ class WikipediaArticleScraper(BasePageScraper):
                 table_parts.append(f"\nContinuation of table: {caption or chunk.section_title}.\n{header_text}\n")
         return table_parts
 
-    def _clean_element_text(self, el) -> str:
+    def _clean_element_text(self, el: "Tag") -> str:
+        """Return normalized visible text for a BeautifulSoup element.
+
+        We join `stripped_strings` to:
+        - collapse whitespace
+        - ignore nested markup boundaries
+        - produce stable text suitable for retrieval/metadata.
+        """
         return " ".join(getattr(el, "stripped_strings", []) or [])
 
-    def _table_extract_divide_rows(self, table) -> tuple[List[str], List[int]]:
+    def _table_extract_table_parts_dividers(self, table: "Tag") -> tuple[list[str], list[int]]:
+        """Find divider rows in a table.
+
+        Wikipedia tables often include single-cell rows (colspan) that act as
+        section dividers within a table. We detect those rows and return:
+        - divider_texts: the text of each divider cell
+        - divider_indexes: the corresponding <tr> index in table.find_all('tr')
+
+        These indices are later used to split one large table into multiple
+        coherent text parts.
+        """
         rows = table.find_all("tr")
         if not rows:
             return [], []
 
-        divider_texts = []
-        divider_indexes = []
+        divider_texts: list[str] = []
+        divider_indexes: list[int] = []
         for index, row in enumerate(rows):
             row_cells = row.find_all(["td", "th"])
             if len(row_cells) == 1 and row_cells[0].has_attr("colspan"):
