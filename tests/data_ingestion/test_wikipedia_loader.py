@@ -27,12 +27,12 @@ def _touch(p: Path, data: bytes = b"x") -> None:
 
 
 def test_load_categories_reads_non_empty_lines(tmp_path: Path) -> None:
-    from data_ingestion.wikipedia_loader import WikipediaLoader
+    import data_ingestion.wikipedia_loader as mod
 
     fp = tmp_path / "cats.txt"
     fp.write_text("\n  \nCat1\nCat2\n", encoding="utf-8")
 
-    assert WikipediaLoader().load_categories(str(fp)) == ["Cat1", "Cat2"]
+    assert mod.WikipediaLoader().load_categories(str(fp)) == ["Cat1", "Cat2"]
 
 
 def test_get_all_articles_from_categories_skips_when_fetch_category_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:

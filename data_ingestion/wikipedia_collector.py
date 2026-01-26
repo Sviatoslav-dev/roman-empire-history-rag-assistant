@@ -35,7 +35,7 @@ class WikipediaCollector:
         wikipedia_loader: WikipediaLoader,
         wikipedia_storage: WikipediaStorage,
         chunk_processor: ChunkProcessor,
-        retriever: QdrantRetriever | None = None,
+        retriever: QdrantRetriever,
     ) -> None:
         self.loader = wikipedia_loader
         self.storage = wikipedia_storage

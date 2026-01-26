@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from data_ingestion.scraper.wikipedia_article_scraper import WikipediaArticleScraper

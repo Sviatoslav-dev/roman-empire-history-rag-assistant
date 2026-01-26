@@ -65,16 +65,16 @@ class _FakeArticle:
 
 
 def test_is_license_allowed_allows_when_missing_isnt_called():
-    from data_ingestion.wikipedia_article_filter import WikipediaArticleFilter
+    import data_ingestion.wikipedia_article_filter as mod
 
-    f = WikipediaArticleFilter()
+    f = mod.WikipediaArticleFilter()
     assert f.is_license_allowed("") is True
 
 
 def test_is_license_allowed_rejects_common_triggers_tokens_and_phrases():
-    from data_ingestion.wikipedia_article_filter import WikipediaArticleFilter
+    import data_ingestion.wikipedia_article_filter as mod
 
-    f = WikipediaArticleFilter()
+    f = mod.WikipediaArticleFilter()
 
     assert f.is_license_allowed("This is FAIR USE") is False
     assert f.is_license_allowed("licensed under Attribution something") is False

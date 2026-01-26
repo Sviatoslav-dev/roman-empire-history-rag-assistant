@@ -2,8 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, cast
 
 import pytest
+
+import data_ingestion.images_preprocessor as mod
+
+
+class _IngestionImageRowLike(Protocol):
+    url: str
+    local_path: str
 
 
 @dataclass(frozen=True)
@@ -38,23 +46,18 @@ class _FakeCairoSVG:
 @pytest.fixture()
 def fake_cairosvg(monkeypatch):
     """Patch `data_ingestion.images_preprocessor.cairosvg` with a tiny fake."""
-    from data_ingestion import images_preprocessor as mod
-
     fake = _FakeCairoSVG()
     monkeypatch.setattr(mod, "cairosvg", fake)
     return fake
 
 
 def test_convert_one_svg_row_missing_file(tmp_path, monkeypatch, fake_cairosvg):
-    from data_ingestion.images_preprocessor import ImagesPreprocessor
-    from data_ingestion import images_preprocessor as mod
-
     fake_pg = _FakePg(rows=[])
     monkeypatch.setattr(mod, "_postgres", fake_pg)
 
     missing = tmp_path / "missing.svg"
-    ok = ImagesPreprocessor()._convert_one_svg_row(
-        _Row(url="http://example/svg", local_path=str(missing)),
+    ok = mod.ImagesPreprocessor()._convert_one_svg_row(
+        cast(_IngestionImageRowLike, _Row(url="http://example/svg", local_path=str(missing))),
         remove_original=False,
     )
 
@@ -64,9 +67,6 @@ def test_convert_one_svg_row_missing_file(tmp_path, monkeypatch, fake_cairosvg):
 
 
 def test_convert_one_svg_row_idempotent_existing_png_updates_db(tmp_path, monkeypatch, fake_cairosvg):
-    from data_ingestion.images_preprocessor import ImagesPreprocessor
-    from data_ingestion import images_preprocessor as mod
-
     svg = tmp_path / "a.svg"
     svg.write_text("<svg></svg>")
 
@@ -76,8 +76,8 @@ def test_convert_one_svg_row_idempotent_existing_png_updates_db(tmp_path, monkey
     fake_pg = _FakePg(rows=[])
     monkeypatch.setattr(mod, "_postgres", fake_pg)
 
-    ok = ImagesPreprocessor()._convert_one_svg_row(
-        _Row(url="http://example/a.svg", local_path=str(svg)),
+    ok = mod.ImagesPreprocessor()._convert_one_svg_row(
+        cast(_IngestionImageRowLike, _Row(url="http://example/a.svg", local_path=str(svg))),
         remove_original=False,
     )
 
@@ -92,17 +92,14 @@ def test_convert_one_svg_row_idempotent_existing_png_updates_db(tmp_path, monkey
 
 
 def test_convert_one_svg_row_success_converts_and_optionally_removes_source(tmp_path, monkeypatch, fake_cairosvg):
-    from data_ingestion.images_preprocessor import ImagesPreprocessor
-    from data_ingestion import images_preprocessor as mod
-
     svg = tmp_path / "b.svg"
     svg.write_text("<svg></svg>")
 
     fake_pg = _FakePg(rows=[])
     monkeypatch.setattr(mod, "_postgres", fake_pg)
 
-    ok = ImagesPreprocessor()._convert_one_svg_row(
-        _Row(url="http://example/b.svg", local_path=str(svg)),
+    ok = mod.ImagesPreprocessor()._convert_one_svg_row(
+        cast(_IngestionImageRowLike, _Row(url="http://example/b.svg", local_path=str(svg))),
         remove_original=True,
     )
 
@@ -117,9 +114,6 @@ def test_convert_one_svg_row_success_converts_and_optionally_removes_source(tmp_
 
 
 def test_convert_svgs_to_png_counts_only_new_conversions(tmp_path, monkeypatch, fake_cairosvg):
-    from data_ingestion.images_preprocessor import ImagesPreprocessor
-    from data_ingestion import images_preprocessor as mod
-
     svg1 = tmp_path / "c.svg"
     svg1.write_text("<svg></svg>")
 
@@ -134,11 +128,10 @@ def test_convert_svgs_to_png_counts_only_new_conversions(tmp_path, monkeypatch, 
     fake_pg = _FakePg(rows=rows)
     monkeypatch.setattr(mod, "_postgres", fake_pg)
 
-    converted = ImagesPreprocessor().convert_svgs_to_png(remove_original=False)
+    converted = mod.ImagesPreprocessor().convert_svgs_to_png(remove_original=False)
 
     # c.svg converts; d.svg is idempotent => total 1
     assert converted == 1
     assert (tmp_path / "c.png").exists()
     assert (tmp_path / "d.png").exists()
     assert len(fake_pg.updated) == 2
-

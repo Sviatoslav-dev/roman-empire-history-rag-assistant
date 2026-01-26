@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from data_ingestion.chunk_models import ArticleChunk, ChunkImageMention
-from data_ingestion.chunk_processor import ChunkProcessor
+import data_ingestion.chunk_processor as mod
 from data_ingestion.wikipedia_image import WikipediaImage
 
 
@@ -35,7 +35,7 @@ def test_split_articles_into_chunks_flattens_and_sets_self_chunks(monkeypatch: p
     article_filter = MagicMock()
     metadata_store = MagicMock()
 
-    processor = ChunkProcessor(loader=loader, article_filter=article_filter, metadata_store=metadata_store)
+    processor = mod.ChunkProcessor(loader=loader, article_filter=article_filter, metadata_store=metadata_store)
 
     # Two scraper-like objects with split_by_chunks
     a1 = MagicMock()
@@ -59,7 +59,7 @@ def test_split_articles_into_chunks_flattens_and_sets_self_chunks(monkeypatch: p
 
 
 def test_extend_chunks_appends_to_internal_list() -> None:
-    processor = ChunkProcessor(loader=MagicMock(), article_filter=MagicMock(), metadata_store=MagicMock())
+    processor = mod.ChunkProcessor(loader=MagicMock(), article_filter=MagicMock(), metadata_store=MagicMock())
 
     c1 = ArticleChunk("T", "/wiki/T", "Intro", "Intro", 1, text_parts=["a"])
     c2 = ArticleChunk("T", "/wiki/T", "Intro", "Intro", 1, text_parts=["b"])
@@ -72,7 +72,7 @@ def test_extend_chunks_appends_to_internal_list() -> None:
 
 def test_download_images_flattens_mentions_and_calls_loader() -> None:
     loader = MagicMock()
-    processor = ChunkProcessor(loader=loader, article_filter=MagicMock(), metadata_store=MagicMock())
+    processor = mod.ChunkProcessor(loader=loader, article_filter=MagicMock(), metadata_store=MagicMock())
 
     processor.chunks = [
         _mk_chunk(img_urls=["https://img/1.png", "https://img/2.png"]),
@@ -89,7 +89,7 @@ def test_download_images_flattens_mentions_and_calls_loader() -> None:
 
 def test_postprocess_images_calls_images_preprocessor() -> None:
     pre = MagicMock()
-    processor = ChunkProcessor(loader=MagicMock(), article_filter=MagicMock(), metadata_store=MagicMock(), images_preprocessor=pre)
+    processor = mod.ChunkProcessor(loader=MagicMock(), article_filter=MagicMock(), metadata_store=MagicMock(), images_preprocessor=pre)
 
     processor.postprocess_images()
     pre.convert_svgs_to_png.assert_called_once_with()
@@ -97,7 +97,7 @@ def test_postprocess_images_calls_images_preprocessor() -> None:
 
 def test_filter_images_by_license_replaces_internal_chunks() -> None:
     article_filter = MagicMock()
-    processor = ChunkProcessor(loader=MagicMock(), article_filter=article_filter, metadata_store=MagicMock())
+    processor = mod.ChunkProcessor(loader=MagicMock(), article_filter=article_filter, metadata_store=MagicMock())
 
     original = [_mk_chunk(img_urls=["https://img/a.png"])]
     filtered = [_mk_chunk(img_urls=[])]
@@ -112,12 +112,10 @@ def test_filter_images_by_license_replaces_internal_chunks() -> None:
 
 
 def test_prepare_text_collection_delegates_to_payload_builder(monkeypatch: pytest.MonkeyPatch) -> None:
-    processor = ChunkProcessor(loader=MagicMock(), article_filter=MagicMock(), metadata_store=MagicMock())
+    processor = mod.ChunkProcessor(loader=MagicMock(), article_filter=MagicMock(), metadata_store=MagicMock())
     processor.chunks = [ArticleChunk("T", "/wiki/T", "Intro", "Intro", 1, text_parts=["hello"], text="hello")]
 
     stub_out = (["txt"], [{"page_title": "T"}])
-
-    import data_ingestion.chunk_processor as mod
 
     def _fake_builder(chunks):
         assert chunks is processor.chunks
@@ -130,7 +128,7 @@ def test_prepare_text_collection_delegates_to_payload_builder(monkeypatch: pytes
 
 def test_prepare_images_collection_resolves_local_path_via_metadata_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     metadata_store = MagicMock()
-    processor = ChunkProcessor(loader=MagicMock(), article_filter=MagicMock(), metadata_store=metadata_store)
+    processor = mod.ChunkProcessor(loader=MagicMock(), article_filter=MagicMock(), metadata_store=metadata_store)
 
     # One mention; build_images_collection_payloads will call local_path_by_url
     processor.chunks = [_mk_chunk(img_urls=["https://img/1.png"])]
@@ -141,8 +139,6 @@ def test_prepare_images_collection_resolves_local_path_via_metadata_store(monkey
         return None
 
     metadata_store.get_image_by_url.side_effect = _get_image_by_url
-
-    import data_ingestion.chunk_processor as mod
 
     def _fake_builder(chunks, *, local_path_by_url):
         assert chunks is processor.chunks
@@ -157,13 +153,11 @@ def test_prepare_images_collection_resolves_local_path_via_metadata_store(monkey
 
 
 def test_prepare_link_collection_delegates_to_payload_builder(monkeypatch: pytest.MonkeyPatch) -> None:
-    processor = ChunkProcessor(loader=MagicMock(), article_filter=MagicMock(), metadata_store=MagicMock())
+    processor = mod.ChunkProcessor(loader=MagicMock(), article_filter=MagicMock(), metadata_store=MagicMock())
     processor.chunks = [ArticleChunk("T", "/wiki/T", "Intro", "Intro", 1, text_parts=["hello"], text="hello")]
 
     unique = {"https://img/1.png": {"image_id": "id1"}}
     expected = [{"text_chunk_id": 0, "image_id": "id1"}]
-
-    import data_ingestion.chunk_processor as mod
 
     def _fake_builder(chunks, unique_images_by_url):
         assert chunks is processor.chunks

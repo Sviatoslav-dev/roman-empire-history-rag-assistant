@@ -86,9 +86,9 @@ def test_get_downloaded_articles_reads_file_and_creates_scraper(monkeypatch: pyt
 
 
 def test_article_title_to_filename_unquotes_and_sanitizes() -> None:
-    from data_ingestion.wikipedia_storage import WikipediaStorage
+    import data_ingestion.wikipedia_storage as mod
 
-    s = WikipediaStorage()
+    s = mod.WikipediaStorage()
 
     out = s.article_title_to_filename("Hello%20World/Bad:Name")
 
@@ -157,11 +157,14 @@ def test_save_article_to_file_writes_atomic(monkeypatch: pytest.MonkeyPatch, tmp
 def test_extract_image_filename_delegates_to_wikipedia_image_get_filename(monkeypatch: pytest.MonkeyPatch) -> None:
     import data_ingestion.wikipedia_storage as mod
 
-    called = {"url": None}
+    class _Called:
+        url: str | None = None
+
+    called = _Called()
 
     class _FakeImage:
         def __init__(self, url: str):
-            called["url"] = url
+            called.url = url
 
         def get_filename(self) -> str:
             return "X.png"
@@ -171,5 +174,4 @@ def test_extract_image_filename_delegates_to_wikipedia_image_get_filename(monkey
     s = mod.WikipediaStorage()
 
     assert s._extract_image_filename("http://example/X.png") == "X.png"
-    assert called["url"] == "http://example/X.png"
-
+    assert called.url == "http://example/X.png"

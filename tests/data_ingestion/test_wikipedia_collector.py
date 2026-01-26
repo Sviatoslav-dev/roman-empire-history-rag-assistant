@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from data_ingestion.wikipedia_collector import WikipediaCollector
+import data_ingestion.wikipedia_collector as mod
 
 
 @pytest.fixture()
@@ -17,13 +17,11 @@ def collector_mocks(monkeypatch: pytest.MonkeyPatch):
     chunk_processor = MagicMock(name="chunk_processor")
 
     # Patch module-level article filter singleton to be controllable in tests.
-    import data_ingestion.wikipedia_collector as mod
-
     article_filter = MagicMock(name="article_filter")
     monkeypatch.setattr(mod, "_article_filter", article_filter)
 
     retriever = MagicMock(name="retriever")
-    collector = WikipediaCollector(loader, storage, chunk_processor, retriever=retriever)
+    collector = mod.WikipediaCollector(loader, storage, chunk_processor, retriever=retriever)
 
     return collector, loader, storage, chunk_processor, retriever, article_filter
 
@@ -91,8 +89,6 @@ def test_collect_articles_returns_empty_when_no_article_urls(collector_mocks, mo
     loader.load_categories.return_value = ["Cat"]
     loader.get_all_articles_from_categories.return_value = []
 
-    import data_ingestion.wikipedia_collector as mod
-
     warn = MagicMock()
     monkeypatch.setattr(mod.logger, "warning", warn)
 
@@ -113,8 +109,6 @@ def test_collect_articles_logs_when_no_valid_categories_but_still_early_exits(co
 
     loader.load_categories.return_value = []
     loader.get_all_articles_from_categories.return_value = []
-
-    import data_ingestion.wikipedia_collector as mod
 
     warn = MagicMock()
     monkeypatch.setattr(mod.logger, "warning", warn)
@@ -171,4 +165,3 @@ def test_collect_articles_falls_back_when_image_ids_are_not_ints(collector_mocks
 
     assert out == [a1]
     retriever.add_images.assert_called_once_with(["/tmp/x.png"], [{"url": "https://img/x.png"}], ids=["abc"])
-
