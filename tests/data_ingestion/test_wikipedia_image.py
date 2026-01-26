@@ -1,4 +1,4 @@
-from tests._import_stubs import install as _install_import_stubs
+from ._import_stubs import install as _install_import_stubs
 
 _install_import_stubs()
 

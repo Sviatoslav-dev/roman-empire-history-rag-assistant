@@ -9,6 +9,6 @@ Disable by setting DISABLE_IMPORT_STUBS=1.
 
 
 def pytest_configure(config):
-    from tests._import_stubs import install
+    from ._import_stubs import install
 
     install()
