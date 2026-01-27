@@ -400,10 +400,15 @@ class QdrantRetriever:
             for i in range(len(image_paths))
         ]
 
-        self.client.upsert(
-            collection_name=IMAGE_COLLECTION_NAME,
-            points=points
-        )
+        BATCH_SIZE = 20  # почни з 10–20 для image embeddings
+
+        for i in range(0, len(points), BATCH_SIZE):
+            batch = points[i:i + BATCH_SIZE]
+
+            self.client.upsert(
+                collection_name=IMAGE_COLLECTION_NAME,
+                points=batch,
+            )
 
     def get_text_chunk_by_id(
         self,
