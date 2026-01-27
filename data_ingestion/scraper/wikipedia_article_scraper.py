@@ -258,10 +258,11 @@ class WikipediaArticleScraper(BasePageScraper):
     ) -> Optional[ArticleChunk]:
         """If `el` contains a heading, close current chunk and start a new one."""
         h = el.find(["h2", "h3", "h4", "h5", "h6"])
-        if not h:
+        h_name = getattr(h, "name", None)
+        if not h or not isinstance(h_name, str):
             return None
 
-        level = int(h.name[1])
+        level = int(h_name[1])
         title_text = " ".join(h.get_text().split())
         if not title_text:
             return None
@@ -303,8 +304,7 @@ class WikipediaArticleScraper(BasePageScraper):
 
         # Tables
         if el.name == "table":
-            self._handle_table(el, current_chunk)
-            return current_chunk
+            return self._handle_table(el, current_chunk, chunks, max_text_size)
 
         # Figure images
         if el.name == "figure":
@@ -337,7 +337,7 @@ class WikipediaArticleScraper(BasePageScraper):
 
         return current_chunk
 
-    def _handle_table(self, el: Tag, current_chunk: ArticleChunk) -> None:
+    def _handle_table(self, el: Tag, current_chunk: ArticleChunk, chunks: List[ArticleChunk], max_chunk_size: int) -> ArticleChunk:
         """Extract infobox or generic table JSON and append it into the chunk text."""
         classes_attr = el.get("class")
         class_str = " ".join(classes_attr) if isinstance(classes_attr, list) else (classes_attr or "")
@@ -347,11 +347,21 @@ class WikipediaArticleScraper(BasePageScraper):
             if infobox_text:
                 current_chunk.text_parts.append(f"{self.title.replace('_', ' ')} infobox: \n\n {infobox_text}")
                 logger.debug("Infobox extracted for '%s' / section '%s'", self.title, current_chunk.section_path)
-            return
+            return current_chunk
 
-        table_data = self._extract_table_generic_json(el)
-        if table_data:
-            current_chunk.text_parts.append(table_data)
+        table_parts = self._extract_table_generic_json(el, max_chunk_size, current_chunk)
+        if len(table_parts) == 1:
+            current_chunk.text_parts.append(table_parts[0])
+        else:
+            for table_part in table_parts:
+                self._finalize_and_append(current_chunk, chunks)
+                current_chunk = self._new_chunk(
+                    section_title=current_chunk.section_title,
+                    section_path=current_chunk.section_path,
+                    section_level=current_chunk.section_level,
+                )
+                current_chunk.text_parts.append(table_part)
+        return current_chunk
 
 
 
@@ -440,7 +450,7 @@ class WikipediaArticleScraper(BasePageScraper):
 
         return src
 
-    def _extract_table_generic_json(self, table):
+    def _extract_table_generic_json(self, table, max_chunk_size: int, chunk: ArticleChunk) -> List[str]:
         """
         Extract an HTML table into a stable, schema-agnostic text representation
         suitable for semantic retrieval and storage.
@@ -448,7 +458,9 @@ class WikipediaArticleScraper(BasePageScraper):
 
         caption, rows = self._table_extract_caption_and_rows(table)
         if not rows:
-            return None
+            return []
+
+        divider_texts, divider_indexes = self._table_extract_table_parts_dividers(table)
 
         header_rows, data_rows = self._table_split_header_and_data(rows)
 
@@ -458,39 +470,107 @@ class WikipediaArticleScraper(BasePageScraper):
             columns = self._table_build_fallback_columns(data_rows)
 
         if not columns:
-            return None
+            return []
 
         structured_rows = self._table_parse_data_rows(data_rows, columns)
 
-        header_text = self._table_render_header_text(caption, columns)
+        header_text = self._table_render_header_text(columns)
         row_texts = self._table_render_rows_text(structured_rows, columns)
 
-        table_text = "\n".join([header_text, ""] + row_texts)
-        return table_text
+        table_parts = [f"Table: {caption or chunk.section_title}.\n{header_text}\n"]
+        for row_index, row in enumerate(row_texts):
+            if not row and row_index in divider_indexes and row_index != 0 and row_index != len(row_texts) - 1:
+                table_part_title = divider_texts[divider_indexes.index(row_index)]
+                new_part = f"\nContinuation of table: {caption or chunk.section_title}.{table_part_title}.\n{header_text}\n"
+
+                if not table_parts[-1].endswith("{header_text}\n"):
+                    table_parts.append(new_part)
+                else:
+                    table_parts[-1] = new_part
+                continue
+
+            table_parts[-1] += f"\n{row}"
+
+            if len(table_parts[-1]) > max_chunk_size and row_index != len(row_texts) - 1:
+                table_parts.append(f"\nContinuation of table: {caption or chunk.section_title}.\n{header_text}\n")
+        return table_parts
+
+    def _clean_element_text(self, el: "Tag") -> str:
+        """Return normalized visible text for a BeautifulSoup element.
+
+        We join `stripped_strings` to:
+        - collapse whitespace
+        - ignore nested markup boundaries
+        - produce stable text suitable for retrieval/metadata.
+        """
+        return " ".join(getattr(el, "stripped_strings", []) or [])
+
+    def _table_extract_table_parts_dividers(self, table: "Tag") -> tuple[list[str], list[int]]:
+        """Find divider rows in a table.
+
+        Wikipedia tables often include single-cell rows (colspan) that act as
+        section dividers within a table. We detect those rows and return:
+        - divider_texts: the text of each divider cell
+        - divider_indexes: the corresponding <tr> index in table.find_all('tr')
+
+        These indices are later used to split one large table into multiple
+        coherent text parts.
+        """
+        rows = table.find_all("tr")
+        if not rows:
+            return [], []
+
+        divider_texts: list[str] = []
+        divider_indexes: list[int] = []
+        for index, row in enumerate(rows):
+            row_cells = row.find_all(["td", "th"])
+            if len(row_cells) == 1 and row_cells[0].has_attr("colspan"):
+                divider_text = self._clean_element_text(row_cells[0])
+                divider_texts.append(divider_text)
+                divider_indexes.append(index)
+
+        return divider_texts, divider_indexes
 
     def _table_extract_caption_and_rows(self, table) -> tuple[Optional[str], list]:
         """Return (caption_text, rows) where rows is a list of <tr> tags."""
-        def clean_text(el) -> str:
-            return " ".join(getattr(el, "stripped_strings", []) or [])
-
         rows = table.find_all("tr")
         if not rows:
             return None, []
 
+        if caption_el := table.find("caption"):
+            caption = self._clean_element_text(caption_el)
+            return caption, rows
+
         caption = None
         first_row_cells = rows[0].find_all(["td", "th"])
         if len(first_row_cells) == 1 and first_row_cells[0].has_attr("colspan"):
-            caption = clean_text(first_row_cells[0])
-            rows = rows[1:]
+            caption = self._clean_element_text(first_row_cells[0])
 
         return caption, rows
 
     def _table_split_header_and_data(self, rows: list) -> tuple[list, list]:
         """Split table rows into header rows (leading rows containing <th>) and data rows."""
         header_rows = []
-        while rows and rows[0].find_all("th"):
-            header_rows.append(rows.pop(0))
-        return header_rows, rows
+        data_rows = []
+        for row_index, row in enumerate(rows):
+            th_elements = row.find_all("th")
+            if not th_elements:
+                data_rows = rows[row_index:]
+                break
+
+            if len(th_elements) == 1:
+                if row_index == 0:
+                    continue
+                else:
+                    data_rows = rows[row_index:]
+                    break
+
+            header_rows.append(row)
+
+        if not data_rows:
+            logger.error("No data rows found in table")
+
+        return header_rows, data_rows
 
     def _table_build_column_hierarchies(self, header_rows: list) -> list[list[str]]:
         """Build column hierarchy arrays from multi-row headers."""
@@ -529,21 +609,19 @@ class WikipediaArticleScraper(BasePageScraper):
 
     def _table_parse_data_rows(self, data_rows: list, columns: list[list[str]]) -> list[dict]:
         """Parse data rows into list of dicts keyed by dot-joined header hierarchy."""
-        def clean_text(el) -> str:
-            return " ".join(getattr(el, "stripped_strings", []) or [])
-
         max_cols = len(columns)
         structured_rows: list[dict] = []
 
         for tr in data_rows:
-            cells = tr.find_all("td")
+            cells = tr.find_all(["td", "th"])
             if len(cells) != max_cols:
+                structured_rows.append({})
                 continue
 
             row_obj: dict = {}
             for col, cell in zip(columns, cells):
                 key = ".".join(col)
-                value = clean_text(cell)
+                value = self._clean_element_text(cell)
 
                 row_obj[key] = value
 
@@ -588,6 +666,10 @@ class WikipediaArticleScraper(BasePageScraper):
         row_texts: list[str] = []
 
         for row in structured_rows:
+            if not row:
+                row_texts.append("")
+                continue
+
             values = []
 
             for key in row.keys():
@@ -601,16 +683,11 @@ class WikipediaArticleScraper(BasePageScraper):
 
         return row_texts
 
-    def _table_render_header_text(self, caption: str, columns: list[list[str]]) -> str:
+    def _table_render_header_text(self, columns: list[list[str]]) -> str:
         """
         Render table caption and column names as short semantic text.
         """
-        lines = []
-
-        if caption:
-            lines.append(f"Table: {caption}.")
-
-        lines.append("Columns:")
+        lines = ["Columns:"]
         for col in columns:
             lines.append(f"- {self._table_normalize_column_name(col)}")
 
