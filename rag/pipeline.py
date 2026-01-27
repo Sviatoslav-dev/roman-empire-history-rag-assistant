@@ -40,34 +40,43 @@ class RAGPipeline:
         self,
         query_image_path: str,
         top_k_images: int,
+        *,
+        question: str,
+        top_k_links: int = 3,
     ) -> tuple[list[RetrievedImage], list[int], dict[int, list[str]]]:
-        """Retrieve nearest images and their linked text chunk ids + captions."""
+        """Retrieve images, then top linkages (caption-embedded) closest to the question."""
         image_results = self.retriever.search_images(query_image_path, top_k=top_k_images)
+        image_ids = [payload.get("image_id") for payload, _s in image_results if payload.get("image_id") is not None]
+
+        # Rank links by caption similarity to the question, limited to the retrieved images
+        link_results = self.retriever.search_links_by_text(question, image_ids=image_ids, top_k=top_k_links)
 
         image_linked_chunk_ids: list[int] = []
-        retrieved_images: list[RetrievedImage] = []
         chunk_captions: dict[int, list[str]] = {}
+        links_by_image: dict[int, list[dict]] = {}
+        for link_payload, _score in link_results:
+            cid = link_payload.get("text_chunk_id")
+            img_id = link_payload.get("image_id")
+            if cid is None or img_id is None:
+                continue
+            image_linked_chunk_ids.append(int(cid))
+            cap = link_payload.get("caption")
+            cap = cap.strip() if isinstance(cap, str) else ""
+            if cap:
+                chunk_captions.setdefault(int(cid), []).append(cap)
+            links_by_image.setdefault(img_id, []).append(link_payload)
 
+        retrieved_images: list[RetrievedImage] = []
         for i, (image_metadata, score) in enumerate(image_results):
             image_id = image_metadata.get("image_id")
-
-            links: list[dict] = []
-            if image_id is not None:
-                links = self.retriever.get_links_by_image_id(int(image_id), limit=200)
-
-            per_image_captions: list[str] = []
-            for link in links:
-                cid = link.get("text_chunk_id")
-                if cid is None:
-                    continue
-
-                image_linked_chunk_ids.append(int(cid))
-
-                cap = link.get("caption")
-                cap = cap.strip() if isinstance(cap, str) else ""
-                if cap:
-                    per_image_captions.append(cap)
-                    chunk_captions.setdefault(int(cid), []).append(cap)
+            per_image_links = links_by_image.get(image_id) if image_id is not None else None
+            per_image_captions = []
+            if per_image_links:
+                for l in per_image_links:
+                    cap = l.get("caption")
+                    cap = cap.strip() if isinstance(cap, str) else ""
+                    if cap:
+                        per_image_captions.append(cap)
 
             retrieved_images.append(
                 RetrievedImage(
@@ -81,6 +90,27 @@ class RAGPipeline:
             )
 
         return retrieved_images, image_linked_chunk_ids, chunk_captions
+
+    def _collect_images_from_text_chunks(self, chunk_ids: list[int]) -> list[RetrievedImage]:
+        """Fetch and deduplicate images linked to the given text chunk ids."""
+        images_by_id: dict[str, RetrievedImage] = {}
+        for cid in chunk_ids:
+            for payload in self.retriever.get_images_by_text_chunk_id(cid):
+                image_id = payload.get("image_id") or payload.get("id") or payload.get("image_path") or payload.get("image_url")
+                if not image_id:
+                    continue
+                sid = str(image_id)
+                if sid in images_by_id:
+                    continue
+                images_by_id[sid] = RetrievedImage(
+                    id=sid,
+                    url=payload.get("image_url"),
+                    local_path=payload.get("image_path") or payload.get("local_path"),
+                    caption=payload.get("caption"),
+                    page_title=payload.get("page_title"),
+                    score=0.0,
+                )
+        return list(images_by_id.values())
 
     @staticmethod
     def _merge_ranked_ids(primary: list[int], secondary: list[int], limit: int) -> list[int]:
