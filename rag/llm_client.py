@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
 from llama_cpp import Llama
 
 from logger import get_logger
@@ -10,6 +11,7 @@ logger = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
+load_dotenv()
 
 # Defaults, with env overrides
 DEFAULT_MODEL_PATH = str(PROJECT_ROOT / os.getenv("LLM_MODEL_PATH"))
