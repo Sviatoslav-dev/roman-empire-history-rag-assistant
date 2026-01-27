@@ -1,6 +1,7 @@
 import hashlib
 import os
 from pathlib import Path
+import tempfile
 from typing import List
 from urllib.parse import unquote
 
@@ -68,19 +69,40 @@ class WikipediaStorage:
         file_path = ARTICLES_DIR / f"{safe_name}.html"
         return file_path.exists()
 
-    def save_article_to_file(self, title: str, html: str) -> None:
+    def _atomic_write_bytes(self, path: Path, data: bytes) -> None:
+        """Write bytes to `path` atomically (temp file + os.replace)."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=path.name, dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except Exception:
+                pass
+            raise
+
+    def _atomic_write_text(self, path: Path, text: str, *, encoding: str = "utf-8") -> None:
+        """Write text to `path` atomically (temp file + os.replace)."""
+        self._atomic_write_bytes(path, text.encode(encoding))
+
+    def save_article_to_file(self, title: str, html: str) -> Path:
         """Persist article HTML to the articles directory using a safe filename.
 
-        Args:
-            title: Article title used to generate the filename.
-            html: Raw HTML content to write to disk.
+        Returns:
+            The final file path written.
         """
         ARTICLES_DIR.mkdir(parents=True, exist_ok=True)
 
         filename = self.article_title_to_filename(title)
         file_path = ARTICLES_DIR / f"{filename}.html"
 
-        file_path.write_text(html, encoding="utf-8")
+        self._atomic_write_text(file_path, html, encoding="utf-8")
+        return file_path
 
     def image_filepath(self, title: str) -> Path:
         """Return the on-disk path where an image with the given filename should live."""
