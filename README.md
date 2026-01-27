@@ -409,23 +409,6 @@ Qdrant collections:
 
 **Vector Database:** Qdrant
 
-## Differentiation from Existing Solutions
-
-**vs. ChatGPT/Claude:**
-
-- ❌ ChatGPT: Hallucinates historical facts, no sources
-- ✅ Our system: Every fact traced to Wikipedia source
-
-**vs. Wikipedia Search:**
-
-- ❌ Wikipedia: Must know exact article title
-- ✅ Our system: Natural language queries, cross-article synthesis
-
-**vs. Perplexity:**
-
-- ❌ Perplexity: Live web search (slower, less focused)
-- ✅ Our system: Fast local RAG, Roman Empire-specific
-
 **Unique Value:**
 
 - Conversational learning (follow-up questions)
