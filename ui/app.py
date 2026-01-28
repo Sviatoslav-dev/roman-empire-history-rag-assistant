@@ -132,6 +132,15 @@ def _load_chat(chat_id: str):
     st.session_state["active_chat"] = chat
 
 
+def _build_chat_history_for_pipeline(messages: list[history_store.ChatMessage]) -> list[tuple[str, str]]:
+    """Convert UI ChatMessages to (role, content) tuples for query rewriting."""
+    history: list[tuple[str, str]] = []
+    for m in messages:
+        if m.content:
+            history.append((m.role, m.content))
+    return history
+
+
 # ---- Page layout ----
 st.set_page_config(page_title="Roman Empire RAG Assistant", page_icon="🏛️")
 st.title("🏛️ Roman Empire RAG Assistant")
@@ -190,7 +199,12 @@ if user_text:
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            answer, retrieved_ctx = pipeline.generate_answer(question=user_text, query_image_path=query_image_path)
+            chat_history = _build_chat_history_for_pipeline(chat.messages)
+            answer, retrieved_ctx = pipeline.generate_answer(
+                question=user_text,
+                query_image_path=query_image_path,
+                chat_history=chat_history,
+            )
 
     # Save assistant message with images
     images_payload = _prepare_image_payload(retrieved_ctx.images)

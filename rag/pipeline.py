@@ -150,32 +150,71 @@ class RAGPipeline:
         caps_text = "\n".join([f"[Image caption] {c}" for c in uniq_caps])
         return f"{caps_text}\n{chunk_text}"
 
+    @staticmethod
+    def _format_history(messages: list[tuple[str, str]], max_turns: int = 6) -> str:
+        """Format recent chat history as plain text lines for query rewriting."""
+        if not messages:
+            return ""
+        recent = messages[-max_turns:]
+        lines = []
+        for role, content in recent:
+            role_label = "User" if role == "user" else "Assistant"
+            lines.append(f"{role_label}: {content}")
+        return "\n".join(lines)
+
+    def _rewrite_question(self, question: str, history: list[tuple[str, str]] | None) -> str:
+        """Rewrite the question using chat history to make it standalone."""
+        if not history:
+            return question
+        history_text = self._format_history(history)
+        user_prompt = self.prompts.query_rewrite_user_template.format(
+            history=history_text,
+            question=question,
+        )
+        rewritten = self.llm.generate(
+            user_prompt,
+            system_prompt=self.prompts.query_rewrite_system_prompt,
+            max_new_tokens=128,
+            temperature=0.2,
+            top_p=0.9,
+        )
+        return rewritten.strip() or question
+
     def generate_answer(
         self,
         question: str,
         top_k_text: int = 5,
         top_k_images: int = 3,
         query_image_path: Optional[str] = None,
+        chat_history: Optional[list[tuple[str, str]]] = None,
     ) -> Tuple[str, RetrievedContext]:
         """Question -> answer (+ retrieved context).
 
         Note: conversational history support is intentionally omitted for now.
         """
 
+        rewritten_question = self._rewrite_question(question, chat_history)
+
         # --- A) Text retrieval always happens ---
-        text_chunks_by_text, text_chunk_ids_by_text = self._retrieve_text(question, top_k_text)
+        text_chunks_by_text, text_chunk_ids_by_text = self._retrieve_text(rewritten_question, top_k_text)
 
         # Text-only
         if not query_image_path:
             context_text = "\n\n".join(text_chunks_by_text)
-            user_prompt = self._build_user_prompt(context_text, question)
+            user_prompt = self._build_user_prompt(context_text, rewritten_question)
+            logger.info("CONTEXT: ", context_text)
+            logger.info("SYSTEM_PROMPT: ", self.prompts.system_prompt)
+            logger.info("USER_PROMPT: ", user_prompt)
             answer = self.llm.generate(user_prompt, system_prompt=self.prompts.system_prompt)
-            return answer, RetrievedContext(text_chunks=text_chunks_by_text, images=[])
+            linked_images = self._collect_images_from_text_chunks(text_chunk_ids_by_text)
+            return answer, RetrievedContext(text_chunks=text_chunks_by_text, images=linked_images)
 
         # --- B) Image retrieval + links ---
         retrieved_images, image_linked_chunk_ids, chunk_captions = self._retrieve_images_with_links(
             query_image_path=query_image_path,
             top_k_images=top_k_images,
+            question=rewritten_question,
+            top_k_links=3,
         )
 
         # --- C) Merge chunk ids ---
@@ -192,7 +231,7 @@ class RAGPipeline:
             merged_text_chunks.append(self._attach_captions(chunk_text, chunk_captions.get(cid, [])))
 
         context_text = "\n\n".join(merged_text_chunks)
-        user_prompt = self._build_user_prompt(context_text, question)
+        user_prompt = self._build_user_prompt(context_text, rewritten_question)
 
         logger.debug(
             "Built prompt (len=%s). text_chunks=%s; images=%s",

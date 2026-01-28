@@ -89,12 +89,7 @@ class WikipediaCollector:
 
         # Upsert images
         if image_paths:
-            try:
-                image_ids_int = [int(x) for x in image_ids]
-                self.retriever.add_images(image_paths, image_metadata, ids=image_ids_int)
-            except Exception:
-                # Fall back to passing ids through if they aren't numeric.
-                self.retriever.add_images(image_paths, image_metadata, ids=image_ids)  # type: ignore[arg-type]
+            self.retriever.add_images(image_paths, image_metadata, ids=image_ids)  # type: ignore[arg-type]
 
         # Upsert links
         if links:

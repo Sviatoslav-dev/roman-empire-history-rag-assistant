@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass, field
 from typing import List
 
@@ -37,7 +38,10 @@ class ArticleChunk:
 
     def finalize_text(self) -> None:
         if not self.text:
-            self.text = "\n\n".join(self.text_parts).strip()
+            text = "\n\n".join(self.text_parts).strip()
+            text = re.sub(r"\[\s*\d+\s*\]", "", text)
+            text = re.sub(r"\s{2,}", " ", text).strip()
+            self.text = text
 
     def is_excluded(self) -> bool:
         return self.section_title in self.EXCLUDED_TITLES

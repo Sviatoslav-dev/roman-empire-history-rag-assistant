@@ -419,7 +419,7 @@ class QdrantRetriever:
         self,
         image_paths: List[str],
         metadata: List[dict],
-        ids: Optional[List[int]] = None
+        ids: Optional[List[str]] = None
     ):
         """Upsert images into IMAGE_COLLECTION.
 

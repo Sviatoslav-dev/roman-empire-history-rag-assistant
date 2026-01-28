@@ -351,7 +351,8 @@ class WikipediaArticleScraper(BasePageScraper):
 
         table_parts = self._extract_table_generic_json(el, max_chunk_size, current_chunk)
         if len(table_parts) == 1:
-            current_chunk.text_parts.append(table_parts[0])
+            current_chunk.text_parts.append(table_parts[0]["text"])
+            current_chunk.images.extend(table_parts[0]["images"])
         else:
             for table_part in table_parts:
                 self._finalize_and_append(current_chunk, chunks)
@@ -360,7 +361,8 @@ class WikipediaArticleScraper(BasePageScraper):
                     section_path=current_chunk.section_path,
                     section_level=current_chunk.section_level,
                 )
-                current_chunk.text_parts.append(table_part)
+                current_chunk.text_parts.append(table_part["text"])
+                current_chunk.images.extend(table_parts[0]["images"])
         return current_chunk
 
 
@@ -450,7 +452,26 @@ class WikipediaArticleScraper(BasePageScraper):
 
         return src
 
-    def _extract_table_generic_json(self, table, max_chunk_size: int, chunk: ArticleChunk) -> List[str]:
+    def _extract_row_image(self, row: Tag) -> tuple[Optional[str], Optional[str]]:
+        """Return (image_url, caption) if a table row contains an image, else (None, None)."""
+        img = row.select_one("img")
+        if not img:
+            return None, None
+
+        image_url = self._get_image_url(img)
+        if not image_url:
+            return None, None
+
+        caption = None
+        for cell in row.find_all(["td", "th"]):
+            text = self._clean_element_text(cell)
+            if text:
+                caption = text
+                break
+
+        return image_url, caption
+
+    def _extract_table_generic_json(self, table, max_chunk_size: int, chunk: ArticleChunk) -> List[dict]:
         """
         Extract an HTML table into a stable, schema-agnostic text representation
         suitable for semantic retrieval and storage.
@@ -476,23 +497,56 @@ class WikipediaArticleScraper(BasePageScraper):
 
         header_text = self._table_render_header_text(columns)
         row_texts = self._table_render_rows_text(structured_rows, columns)
+        table_chunk_title = caption or chunk.section_title
 
-        table_parts = [f"Table: {caption or chunk.section_title}.\n{header_text}\n"]
+        if chunk.section_title == "Julio-Claudian dynasty (27 BC – AD 68)":
+            print()
+
+        table_parts = [
+            {
+                "text": f"Table: {caption or chunk.section_title}.\n{header_text}\n",
+                "images": []
+            }
+        ]
         for row_index, row in enumerate(row_texts):
+            image_url, image_caption = (None, None)
+            if row_index < len(data_rows):
+                image_url, image_caption = self._extract_row_image(data_rows[row_index])
+
             if not row and row_index in divider_indexes and row_index != 0 and row_index != len(row_texts) - 1:
                 table_part_title = divider_texts[divider_indexes.index(row_index)]
-                new_part = f"\nContinuation of table: {caption or chunk.section_title}.{table_part_title}.\n{header_text}\n"
+                table_chunk_title = f"{(caption or chunk.section_title)}.{table_part_title}"
+                new_part = {
+                    "text": f"\nContinuation of table: {table_chunk_title}.\n{header_text}\n",
+                    "images": []
+                }
 
-                if not table_parts[-1].endswith("{header_text}\n"):
+                if not table_parts[-1]["text"].endswith("{header_text}\n"):
                     table_parts.append(new_part)
                 else:
                     table_parts[-1] = new_part
                 continue
 
-            table_parts[-1] += f"\n{row}"
+            table_parts[-1]["text"] += f"\n{row}"
 
             if len(table_parts[-1]) > max_chunk_size and row_index != len(row_texts) - 1:
-                table_parts.append(f"\nContinuation of table: {caption or chunk.section_title}.\n{header_text}\n")
+                table_parts.append(
+                    {
+                        "text": f"\nContinuation of table: {table_chunk_title}.\n{header_text}\n",
+                        "images": []
+                    }
+                )
+
+            if image_url:
+                wiki_image = WikipediaImage(image_url)
+                wiki_image.normalize_url()
+                table_parts[-1]["images"].append(ChunkImageMention(image=wiki_image, caption=image_caption or ""))
+                table_parts.append(
+                    {
+                        "text": f"\nContinuation of table: {table_chunk_title}.\n{header_text}\n",
+                        "images": []
+                    }
+                )
         return table_parts
 
     def _clean_element_text(self, el: "Tag") -> str:
