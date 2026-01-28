@@ -54,20 +54,25 @@ class RAGPipeline:
         image_linked_chunk_ids: list[int] = []
         chunk_captions: dict[int, list[str]] = {}
         links_by_image: dict[int, list[dict]] = {}
+        allowed_image_ids: set[int] = set()
         for link_payload, _score in link_results:
             cid = link_payload.get("text_chunk_id")
             img_id = link_payload.get("image_id")
             if cid is None or img_id is None:
                 continue
             image_linked_chunk_ids.append(int(cid))
+            allowed_image_ids.add(int(img_id))
             cap = link_payload.get("caption")
             cap = cap.strip() if isinstance(cap, str) else ""
             if cap:
                 chunk_captions.setdefault(int(cid), []).append(cap)
             links_by_image.setdefault(img_id, []).append(link_payload)
 
+        if not allowed_image_ids:
+            return [], image_linked_chunk_ids, chunk_captions
+
         retrieved_images: list[RetrievedImage] = []
-        for i, (image_metadata, score) in enumerate(image_results):
+        for (image_metadata, score) in image_results:
             image_id = image_metadata.get("image_id")
             per_image_links = links_by_image.get(image_id) if image_id is not None else None
             per_image_captions = []
@@ -80,7 +85,7 @@ class RAGPipeline:
 
             retrieved_images.append(
                 RetrievedImage(
-                    id=str(i),
+                    id=image_id,
                     url=image_metadata.get("image_url"),
                     local_path=image_metadata.get("image_path") or image_metadata.get("local_path"),
                     caption=(per_image_captions[0] if per_image_captions else None),
@@ -96,7 +101,7 @@ class RAGPipeline:
         images_by_id: dict[str, RetrievedImage] = {}
         for cid in chunk_ids:
             for payload in self.retriever.get_images_by_text_chunk_id(cid):
-                image_id = payload.get("image_id") or payload.get("id") or payload.get("image_path") or payload.get("image_url")
+                image_id = payload["image_id"]
                 if not image_id:
                     continue
                 sid = str(image_id)
@@ -111,6 +116,36 @@ class RAGPipeline:
                     score=0.0,
                 )
         return list(images_by_id.values())
+
+    def _filter_images_by_caption_similarity(
+        self,
+        question: str,
+        images: list[RetrievedImage],
+        top_k: int | None = None,
+    ) -> list[RetrievedImage]:
+        """Keep only images whose caption embeddings are similar to the question."""
+        image_ids: list[str] = []
+        id_map: dict[str, RetrievedImage] = {}
+        for img in images:
+            image_ids.append(img.id)
+            id_map[img.id] = img
+
+        if not image_ids:
+            return []
+
+        limit = top_k if top_k is not None else len(image_ids)
+        link_results = self.retriever.search_links_by_text(
+            question, image_ids=image_ids, top_k=limit, score_threshold=0.5
+        )
+        allowed: set[str] = set()
+        for payload, _score in link_results:
+            img_id = payload["image_id"]
+            allowed.add(img_id)
+
+        if not allowed:
+            return []
+
+        return [id_map[iid] for iid in image_ids if iid in allowed and iid in id_map]
 
     @staticmethod
     def _merge_ranked_ids(primary: list[int], secondary: list[int], limit: int) -> list[int]:
@@ -207,6 +242,7 @@ class RAGPipeline:
             logger.info("USER_PROMPT: ", user_prompt)
             answer = self.llm.generate(user_prompt, system_prompt=self.prompts.system_prompt)
             linked_images = self._collect_images_from_text_chunks(text_chunk_ids_by_text)
+            linked_images = self._filter_images_by_caption_similarity(rewritten_question, linked_images, top_k=len(linked_images) or None)
             return answer, RetrievedContext(text_chunks=text_chunks_by_text, images=linked_images)
 
         # --- B) Image retrieval + links ---

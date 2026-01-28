@@ -193,7 +193,7 @@ class QdrantRetriever:
     def search_links_by_text(
         self,
         query: str,
-        image_ids: List[int],
+        image_ids: List[str],
         top_k: int = 3,
         score_threshold: float = 0.1,
     ) -> List[Tuple[dict, float]]:
@@ -285,13 +285,14 @@ class QdrantRetriever:
         )
 
         out: List[dict] = []
-        for img_point in image_points or []:
+        for img_point in image_points:
             img_payload = dict(img_point.payload or {})
             link_payload = link_by_image_id.get(img_point.id, {})
             # link-specific info should not live on the image point
             for k in ("caption", "section_title", "section_path", "section_level", "page_title", "page_url", "text_chunk_id"):
                 if k in link_payload and link_payload.get(k) is not None:
                     img_payload[k] = link_payload.get(k)
+                    img_payload["image_id"] = img_point.id
             out.append(img_payload)
 
         return out

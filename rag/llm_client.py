@@ -57,7 +57,7 @@ class LLMClient:
     def generate(
         self,
         prompt: str,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 1024,
         temperature: float = 0.7,
         top_p: float = 0.9,
         *,
