@@ -16,8 +16,6 @@ against a real DB, etc.), disable these stubs by setting:
 before running pytest.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 import types

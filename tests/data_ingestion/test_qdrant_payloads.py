@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from data_ingestion.chunk_models import ArticleChunk, ChunkImageMention

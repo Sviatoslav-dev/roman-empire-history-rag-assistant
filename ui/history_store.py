@@ -6,8 +6,6 @@ Supports two backends:
 
 Set the backend with the environment variable `HISTORY_STORE_BACKEND=session` to enable session storage.
 """
-from __future__ import annotations
-
 import json
 import os
 import uuid

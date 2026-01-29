@@ -54,14 +54,14 @@ class RAGPipeline:
         image_linked_chunk_ids: list[int] = []
         chunk_captions: dict[int, list[str]] = {}
         links_by_image: dict[int, list[dict]] = {}
-        allowed_image_ids: set[int] = set()
+        allowed_image_ids: set[str] = set()
         for link_payload, _score in link_results:
             cid = link_payload.get("text_chunk_id")
             img_id = link_payload.get("image_id")
             if cid is None or img_id is None:
                 continue
             image_linked_chunk_ids.append(int(cid))
-            allowed_image_ids.add(int(img_id))
+            allowed_image_ids.add(img_id)
             cap = link_payload.get("caption")
             cap = cap.strip() if isinstance(cap, str) else ""
             if cap:
@@ -146,6 +146,45 @@ class RAGPipeline:
             return []
 
         return [id_map[iid] for iid in image_ids if iid in allowed and iid in id_map]
+
+    def _dedupe_images(self, images: list[RetrievedImage]) -> list[RetrievedImage]:
+        """Remove duplicate images by image id (fallback to url/local_path when id is missing).
+
+        Keeps the first-seen ordering but, if a later duplicate has a higher score, it replaces the earlier
+        entry with the higher-scored one.
+        """
+        if not images:
+            return []
+
+        best_map: dict[str | None, RetrievedImage] = {}
+        order: list[str | None] = []
+
+        def _key(img: RetrievedImage):
+            if img.id is not None:
+                return str(img.id)
+            # fallback to url/local_path so we still dedupe obvious duplicates without an id
+            return img.url or img.local_path or None
+
+        for img in images:
+            k = _key(img)
+            if k not in best_map:
+                best_map[k] = img
+                order.append(k)
+            else:
+                # prefer higher score if available
+                existing = best_map[k]
+                try:
+                    existing_score = float(existing.score or 0.0)
+                except Exception:
+                    existing_score = 0.0
+                try:
+                    new_score = float(img.score or 0.0)
+                except Exception:
+                    new_score = 0.0
+                if new_score > existing_score:
+                    best_map[k] = img
+
+        return [best_map[k] for k in order]
 
     @staticmethod
     def _merge_ranked_ids(primary: list[int], secondary: list[int], limit: int) -> list[int]:
@@ -242,7 +281,10 @@ class RAGPipeline:
             logger.info("USER_PROMPT: ", user_prompt)
             answer = self.llm.generate(user_prompt, system_prompt=self.prompts.system_prompt)
             linked_images = self._collect_images_from_text_chunks(text_chunk_ids_by_text)
-            linked_images = self._filter_images_by_caption_similarity(rewritten_question, linked_images, top_k=len(linked_images) or None)
+            linked_images = self._filter_images_by_caption_similarity(
+                rewritten_question, linked_images, top_k=len(linked_images) or None
+            )
+            linked_images = self._dedupe_images(linked_images)
             return answer, RetrievedContext(text_chunks=text_chunks_by_text, images=linked_images)
 
         # --- B) Image retrieval + links ---
@@ -277,6 +319,7 @@ class RAGPipeline:
         )
 
         answer = self.llm.generate(user_prompt, system_prompt=self.prompts.system_prompt)
+        retrieved_images = self._dedupe_images(retrieved_images)
         return answer, RetrievedContext(text_chunks=merged_text_chunks, images=retrieved_images)
 
 

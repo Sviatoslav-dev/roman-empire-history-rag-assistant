@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 # Install import-time stubs *before* importing production modules.
 from ._import_stubs import install as _install_import_stubs
 
