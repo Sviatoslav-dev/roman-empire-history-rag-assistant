@@ -33,3 +33,6 @@ llama-cpp-python>=0.2.0  # For GGUF model support
 
 # --- Added for PostgreSQL driver ---
 psycopg[binary]>=3.2.0
+# --- UI ---
+streamlit>=1.40.0
+gradio>=4.31.4

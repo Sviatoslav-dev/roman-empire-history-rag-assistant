@@ -40,38 +40,52 @@ class RAGPipeline:
         self,
         query_image_path: str,
         top_k_images: int,
+        *,
+        question: str,
+        top_k_links: int = 3,
     ) -> tuple[list[RetrievedImage], list[int], dict[int, list[str]]]:
-        """Retrieve nearest images and their linked text chunk ids + captions."""
+        """Retrieve images, then top linkages (caption-embedded) closest to the question."""
         image_results = self.retriever.search_images(query_image_path, top_k=top_k_images)
+        image_ids = [payload.get("image_id") for payload, _s in image_results if payload.get("image_id") is not None]
+
+        # Rank links by caption similarity to the question, limited to the retrieved images
+        link_results = self.retriever.search_links_by_text(question, image_ids=image_ids, top_k=top_k_links)
 
         image_linked_chunk_ids: list[int] = []
-        retrieved_images: list[RetrievedImage] = []
         chunk_captions: dict[int, list[str]] = {}
+        links_by_image: dict[int, list[dict]] = {}
+        allowed_image_ids: set[str] = set()
+        for link_payload, _score in link_results:
+            cid = link_payload.get("text_chunk_id")
+            img_id = link_payload.get("image_id")
+            if cid is None or img_id is None:
+                continue
+            image_linked_chunk_ids.append(int(cid))
+            allowed_image_ids.add(img_id)
+            cap = link_payload.get("caption")
+            cap = cap.strip() if isinstance(cap, str) else ""
+            if cap:
+                chunk_captions.setdefault(int(cid), []).append(cap)
+            links_by_image.setdefault(img_id, []).append(link_payload)
 
-        for i, (image_metadata, score) in enumerate(image_results):
+        if not allowed_image_ids:
+            return [], image_linked_chunk_ids, chunk_captions
+
+        retrieved_images: list[RetrievedImage] = []
+        for (image_metadata, score) in image_results:
             image_id = image_metadata.get("image_id")
-
-            links: list[dict] = []
-            if image_id is not None:
-                links = self.retriever.get_links_by_image_id(int(image_id), limit=200)
-
-            per_image_captions: list[str] = []
-            for link in links:
-                cid = link.get("text_chunk_id")
-                if cid is None:
-                    continue
-
-                image_linked_chunk_ids.append(int(cid))
-
-                cap = link.get("caption")
-                cap = cap.strip() if isinstance(cap, str) else ""
-                if cap:
-                    per_image_captions.append(cap)
-                    chunk_captions.setdefault(int(cid), []).append(cap)
+            per_image_links = links_by_image.get(image_id) if image_id is not None else None
+            per_image_captions = []
+            if per_image_links:
+                for l in per_image_links:
+                    cap = l.get("caption")
+                    cap = cap.strip() if isinstance(cap, str) else ""
+                    if cap:
+                        per_image_captions.append(cap)
 
             retrieved_images.append(
                 RetrievedImage(
-                    id=str(i),
+                    id=image_id,
                     url=image_metadata.get("image_url"),
                     local_path=image_metadata.get("image_path") or image_metadata.get("local_path"),
                     caption=(per_image_captions[0] if per_image_captions else None),
@@ -81,6 +95,96 @@ class RAGPipeline:
             )
 
         return retrieved_images, image_linked_chunk_ids, chunk_captions
+
+    def _collect_images_from_text_chunks(self, chunk_ids: list[int]) -> list[RetrievedImage]:
+        """Fetch and deduplicate images linked to the given text chunk ids."""
+        images_by_id: dict[str, RetrievedImage] = {}
+        for cid in chunk_ids:
+            for payload in self.retriever.get_images_by_text_chunk_id(cid):
+                image_id = payload["image_id"]
+                if not image_id:
+                    continue
+                sid = str(image_id)
+                if sid in images_by_id:
+                    continue
+                images_by_id[sid] = RetrievedImage(
+                    id=sid,
+                    url=payload.get("image_url"),
+                    local_path=payload.get("image_path") or payload.get("local_path"),
+                    caption=payload.get("caption"),
+                    page_title=payload.get("page_title"),
+                    score=0.0,
+                )
+        return list(images_by_id.values())
+
+    def _filter_images_by_caption_similarity(
+        self,
+        question: str,
+        images: list[RetrievedImage],
+        top_k: int | None = None,
+    ) -> list[RetrievedImage]:
+        """Keep only images whose caption embeddings are similar to the question."""
+        image_ids: list[str] = []
+        id_map: dict[str, RetrievedImage] = {}
+        for img in images:
+            image_ids.append(img.id)
+            id_map[img.id] = img
+
+        if not image_ids:
+            return []
+
+        limit = top_k if top_k is not None else len(image_ids)
+        link_results = self.retriever.search_links_by_text(
+            question, image_ids=image_ids, top_k=limit, score_threshold=0.5
+        )
+        allowed: set[str] = set()
+        for payload, _score in link_results:
+            img_id = payload["image_id"]
+            allowed.add(img_id)
+
+        if not allowed:
+            return []
+
+        return [id_map[iid] for iid in image_ids if iid in allowed and iid in id_map]
+
+    def _dedupe_images(self, images: list[RetrievedImage]) -> list[RetrievedImage]:
+        """Remove duplicate images by image id (fallback to url/local_path when id is missing).
+
+        Keeps the first-seen ordering but, if a later duplicate has a higher score, it replaces the earlier
+        entry with the higher-scored one.
+        """
+        if not images:
+            return []
+
+        best_map: dict[str | None, RetrievedImage] = {}
+        order: list[str | None] = []
+
+        def _key(img: RetrievedImage):
+            if img.id is not None:
+                return str(img.id)
+            # fallback to url/local_path so we still dedupe obvious duplicates without an id
+            return img.url or img.local_path or None
+
+        for img in images:
+            k = _key(img)
+            if k not in best_map:
+                best_map[k] = img
+                order.append(k)
+            else:
+                # prefer higher score if available
+                existing = best_map[k]
+                try:
+                    existing_score = float(existing.score or 0.0)
+                except Exception:
+                    existing_score = 0.0
+                try:
+                    new_score = float(img.score or 0.0)
+                except Exception:
+                    new_score = 0.0
+                if new_score > existing_score:
+                    best_map[k] = img
+
+        return [best_map[k] for k in order]
 
     @staticmethod
     def _merge_ranked_ids(primary: list[int], secondary: list[int], limit: int) -> list[int]:
@@ -120,32 +224,75 @@ class RAGPipeline:
         caps_text = "\n".join([f"[Image caption] {c}" for c in uniq_caps])
         return f"{caps_text}\n{chunk_text}"
 
+    @staticmethod
+    def _format_history(messages: list[tuple[str, str]], max_turns: int = 6) -> str:
+        """Format recent chat history as plain text lines for query rewriting."""
+        if not messages:
+            return ""
+        recent = messages[-max_turns:]
+        lines = []
+        for role, content in recent:
+            role_label = "User" if role == "user" else "Assistant"
+            lines.append(f"{role_label}: {content}")
+        return "\n".join(lines)
+
+    def _rewrite_question(self, question: str, history: list[tuple[str, str]] | None) -> str:
+        """Rewrite the question using chat history to make it standalone."""
+        if not history:
+            return question
+        history_text = self._format_history(history)
+        user_prompt = self.prompts.query_rewrite_user_template.format(
+            history=history_text,
+            question=question,
+        )
+        rewritten = self.llm.generate(
+            user_prompt,
+            system_prompt=self.prompts.query_rewrite_system_prompt,
+            max_new_tokens=128,
+            temperature=0.2,
+            top_p=0.9,
+        )
+        return rewritten.strip() or question
+
     def generate_answer(
         self,
         question: str,
         top_k_text: int = 5,
         top_k_images: int = 3,
         query_image_path: Optional[str] = None,
+        chat_history: Optional[list[tuple[str, str]]] = None,
     ) -> Tuple[str, RetrievedContext]:
         """Question -> answer (+ retrieved context).
 
         Note: conversational history support is intentionally omitted for now.
         """
 
+        rewritten_question = self._rewrite_question(question, chat_history)
+
         # --- A) Text retrieval always happens ---
-        text_chunks_by_text, text_chunk_ids_by_text = self._retrieve_text(question, top_k_text)
+        text_chunks_by_text, text_chunk_ids_by_text = self._retrieve_text(rewritten_question, top_k_text)
 
         # Text-only
         if not query_image_path:
             context_text = "\n\n".join(text_chunks_by_text)
-            user_prompt = self._build_user_prompt(context_text, question)
+            user_prompt = self._build_user_prompt(context_text, rewritten_question)
+            logger.info("CONTEXT: ", context_text)
+            logger.info("SYSTEM_PROMPT: ", self.prompts.system_prompt)
+            logger.info("USER_PROMPT: ", user_prompt)
             answer = self.llm.generate(user_prompt, system_prompt=self.prompts.system_prompt)
-            return answer, RetrievedContext(text_chunks=text_chunks_by_text, images=[])
+            linked_images = self._collect_images_from_text_chunks(text_chunk_ids_by_text)
+            linked_images = self._filter_images_by_caption_similarity(
+                rewritten_question, linked_images, top_k=len(linked_images) or None
+            )
+            linked_images = self._dedupe_images(linked_images)
+            return answer, RetrievedContext(text_chunks=text_chunks_by_text, images=linked_images)
 
         # --- B) Image retrieval + links ---
         retrieved_images, image_linked_chunk_ids, chunk_captions = self._retrieve_images_with_links(
             query_image_path=query_image_path,
             top_k_images=top_k_images,
+            question=rewritten_question,
+            top_k_links=3,
         )
 
         # --- C) Merge chunk ids ---
@@ -162,7 +309,7 @@ class RAGPipeline:
             merged_text_chunks.append(self._attach_captions(chunk_text, chunk_captions.get(cid, [])))
 
         context_text = "\n\n".join(merged_text_chunks)
-        user_prompt = self._build_user_prompt(context_text, question)
+        user_prompt = self._build_user_prompt(context_text, rewritten_question)
 
         logger.debug(
             "Built prompt (len=%s). text_chunks=%s; images=%s",
@@ -172,6 +319,7 @@ class RAGPipeline:
         )
 
         answer = self.llm.generate(user_prompt, system_prompt=self.prompts.system_prompt)
+        retrieved_images = self._dedupe_images(retrieved_images)
         return answer, RetrievedContext(text_chunks=merged_text_chunks, images=retrieved_images)
 
 

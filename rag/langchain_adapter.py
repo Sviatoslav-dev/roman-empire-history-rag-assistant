@@ -19,7 +19,7 @@ from rag.retriever import QdrantRetriever
 class LangChainLLM(LLM):
     """LangChain LLM wrapper that delegates to :class:`rag.llm_client.LLMClient`."""
 
-    def __init__(self, client: LLMClient, max_new_tokens: int = 256, temperature: float = 0.7):
+    def __init__(self, client: LLMClient, max_new_tokens: int = 1024, temperature: float = 0.7):
         super().__init__()
         self._client = client
         self._max_new_tokens = max_new_tokens

@@ -29,6 +29,8 @@ class TextEmbedder:
         self.model = SentenceTransformer(model_name)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(self.device)
+        # Stash dimension so callers can size collections without extra probes.
+        self.embedding_dim = self.model.get_sentence_embedding_dimension()
 
     def embed(self, texts: Union[str, List[str]]) -> np.ndarray:
         """Generate embeddings for text(s)."""

@@ -46,6 +46,8 @@ class WikipediaCollector:
         """Collect, process, and ingest Wikipedia articles discovered from categories."""
         categories = self.loader.load_categories(categories_file)
         article_urls = self.loader.get_all_articles_from_categories(categories)
+        article_urls.update(self.loader.get_all_articles_from_topic("Roman Empire", "Ancient_Rome_topics12254"))
+        article_urls.update(self.loader.get_all_articles_from_topic("Byzantine Empire", "Byzantine_Empire_topics21674"))
 
         if categories:
             logger.info("Found %d articles in categories %s", len(article_urls), categories)
@@ -89,12 +91,7 @@ class WikipediaCollector:
 
         # Upsert images
         if image_paths:
-            try:
-                image_ids_int = [int(x) for x in image_ids]
-                self.retriever.add_images(image_paths, image_metadata, ids=image_ids_int)
-            except Exception:
-                # Fall back to passing ids through if they aren't numeric.
-                self.retriever.add_images(image_paths, image_metadata, ids=image_ids)  # type: ignore[arg-type]
+            self.retriever.add_images(image_paths, image_metadata, ids=image_ids)  # type: ignore[arg-type]
 
         # Upsert links
         if links:

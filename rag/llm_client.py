@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
 from llama_cpp import Llama
 
 from logger import get_logger
@@ -10,6 +11,7 @@ logger = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
+load_dotenv()
 
 # Defaults, with env overrides
 DEFAULT_MODEL_PATH = str(PROJECT_ROOT / os.getenv("LLM_MODEL_PATH"))
@@ -55,7 +57,7 @@ class LLMClient:
     def generate(
         self,
         prompt: str,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 1024,
         temperature: float = 0.7,
         top_p: float = 0.9,
         *,

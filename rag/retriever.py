@@ -1,5 +1,5 @@
 import os
-
+from collections import Counter
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -54,7 +54,8 @@ class QdrantRetriever:
 
     def _ensure_collections(self):
         """Create required Qdrant collections if they don't exist."""
-        # Text collection (384 dimensions for all-MiniLM-L6-v2)
+        # Text collection (dimension from embedder; defaults to 384 for MiniLM)
+        text_vector_size = getattr(self.text_embedder, "embedding_dim", 384)
         try:
             self.client.get_collection(TEXT_COLLECTION_NAME)
         except UnexpectedResponse as e:
@@ -62,7 +63,7 @@ class QdrantRetriever:
                 raise
             self.client.create_collection(
                 collection_name=TEXT_COLLECTION_NAME,
-                vectors_config=VectorParams(size=384, distance=Distance.COSINE),
+                vectors_config=VectorParams(size=text_vector_size, distance=Distance.COSINE),
             )
 
         # Image collection (512 dimensions for OpenCLIP ViT-B-32)
@@ -76,8 +77,7 @@ class QdrantRetriever:
                 vectors_config=VectorParams(size=512, distance=Distance.COSINE),
             )
 
-        # Link collection: dummy 1D vectors, used only for payload filtering.
-        # Qdrant requires vectors unless you use sparse-only collections; we keep this simple.
+        # Link collection now stores caption embeddings (same dim as text embeddings)
         try:
             self.client.get_collection(LINK_COLLECTION_NAME)
         except UnexpectedResponse as e:
@@ -85,7 +85,7 @@ class QdrantRetriever:
                 raise
             self.client.create_collection(
                 collection_name=LINK_COLLECTION_NAME,
-                vectors_config=VectorParams(size=1, distance=Distance.COSINE),
+                vectors_config=VectorParams(size=text_vector_size, distance=Distance.COSINE),
             )
 
     def search_text(
@@ -190,6 +190,39 @@ class QdrantRetriever:
 
         return out
 
+    def search_links_by_text(
+        self,
+        query: str,
+        image_ids: List[str],
+        top_k: int = 3,
+        score_threshold: float = 0.1,
+    ) -> List[Tuple[dict, float]]:
+        """Search link points (caption embeddings) by text, constrained to images."""
+        if not image_ids:
+            return []
+
+        query_vector = self.text_embedder.embed(query)[0]
+
+        from qdrant_client.models import Filter, FieldCondition, MatchAny
+
+        results = self.client.query_points(
+            collection_name=LINK_COLLECTION_NAME,
+            query=query_vector.tolist(),
+            limit=top_k,
+            score_threshold=score_threshold,
+            with_payload=True,
+            query_filter=Filter(
+                must=[
+                    FieldCondition(key="image_id", match=MatchAny(any=image_ids))
+                ]
+            ),
+        )
+
+        return [
+            (dict(point.payload or {}), point.score)
+            for point in results.points
+        ]
+
     def get_images_by_text_chunk_id(
         self,
         text_chunk_id: int
@@ -252,13 +285,14 @@ class QdrantRetriever:
         )
 
         out: List[dict] = []
-        for img_point in image_points or []:
+        for img_point in image_points:
             img_payload = dict(img_point.payload or {})
             link_payload = link_by_image_id.get(img_point.id, {})
             # link-specific info should not live on the image point
             for k in ("caption", "section_title", "section_path", "section_level", "page_title", "page_url", "text_chunk_id"):
                 if k in link_payload and link_payload.get(k) is not None:
                     img_payload[k] = link_payload.get(k)
+                    img_payload["image_id"] = img_point.id
             out.append(img_payload)
 
         return out
@@ -309,19 +343,28 @@ class QdrantRetriever:
             links: List of link payload dicts.
             ids: Optional explicit point ids for link points (defaults to enumerate()).
         """
+        if not links:
+            return
+
+        captions = [(link.get("caption") or "").strip() for link in links]
+        caption_embeddings = self.text_embedder.embed(captions)
+
         points = [
             PointStruct(
                 id=ids[i] if ids else i,
-                vector=[1.0],
+                vector=caption_embeddings[i].tolist(),
                 payload=links[i]
             )
             for i in range(len(links))
         ]
 
-        self.client.upsert(
-            collection_name=LINK_COLLECTION_NAME,
-            points=points
-        )
+        batch_size = 256
+        for start in range(0, len(points), batch_size):
+            batch = points[start:start + batch_size]
+            self.client.upsert(
+                collection_name=LINK_COLLECTION_NAME,
+                points=batch
+            )
 
     def add_text_chunks(
         self,
@@ -377,7 +420,7 @@ class QdrantRetriever:
         self,
         image_paths: List[str],
         metadata: List[dict],
-        ids: Optional[List[int]] = None
+        ids: Optional[List[str]] = None
     ):
         """Upsert images into IMAGE_COLLECTION.
 
@@ -400,10 +443,15 @@ class QdrantRetriever:
             for i in range(len(image_paths))
         ]
 
-        self.client.upsert(
-            collection_name=IMAGE_COLLECTION_NAME,
-            points=points
-        )
+        BATCH_SIZE = 20
+
+        for i in range(0, len(points), BATCH_SIZE):
+            batch = points[i:i + BATCH_SIZE]
+
+            self.client.upsert(
+                collection_name=IMAGE_COLLECTION_NAME,
+                points=batch,
+            )
 
     def get_text_chunk_by_id(
         self,
@@ -424,6 +472,74 @@ class QdrantRetriever:
             payload = points[0].payload or {}
             return payload.get("text", ""), {k: v for k, v in payload.items() if k != "text"}
         return None
+
+    def get_top_image_ids(
+        self,
+        top_k: int = 1,
+        max_points: Optional[int] = None,
+        batch_size: int = 512
+    ) -> List[dict]:
+        """Return the most frequent image ids in LINK_COLLECTION enriched with URLs.
+
+        Args:
+            top_k: Number of image ids to return, ordered by frequency desc.
+            max_points: Optional hard cap on how many link points to scan (None = all).
+            batch_size: Scroll batch size when reading link points.
+
+        Returns:
+            List of dicts: {'image_id': id, 'image_url': url or None, 'count': n},
+            sorted by count desc then image_id asc.
+        """
+        from qdrant_client.models import Filter
+
+        counter: Counter = Counter()
+        scanned = 0
+        offset = None
+
+        while True:
+            link_points, offset = self.client.scroll(
+                collection_name=LINK_COLLECTION_NAME,
+                scroll_filter=Filter(must=[]),
+                limit=batch_size,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False
+            )
+
+            for p in link_points or []:
+                payload = p.payload or {}
+                image_id = payload.get("image_id")
+                if image_id is None:
+                    continue
+                counter[image_id] += 1
+                scanned += 1
+                if max_points is not None and scanned >= max_points:
+                    offset = None  # force exit
+                    break
+
+            if not offset:
+                break
+
+        if not counter:
+            return []
+
+        sorted_items = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+        top_items = sorted_items[:max(1, top_k)]
+
+        image_ids = [image_id for image_id, _ in top_items]
+        image_points = self.client.retrieve(
+            collection_name=IMAGE_COLLECTION_NAME,
+            ids=image_ids,
+            with_payload=True,
+            with_vectors=False
+        )
+
+        url_by_id = {p.id: (p.payload or {}).get("image_url") for p in (image_points or [])}
+
+        return [
+            {"image_id": image_id, "image_url": url_by_id.get(image_id), "count": count}
+            for image_id, count in top_items
+        ]
 
     def get_links_by_image_id(self, image_id: str | int, limit: int = 50) -> List[dict]:
         """Return link payload dicts for a given image id.
