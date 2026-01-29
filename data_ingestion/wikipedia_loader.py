@@ -66,6 +66,34 @@ class WikipediaLoader:
 
         return articles
 
+    def get_all_articles_from_topic(self, article_title, aria_labelledby) -> Set[str]:
+        articles = set()
+
+        logger.info(f"Crawling topic from the {article_title}")
+
+        html = _wikipedia_client.fetch_article(article_title)
+        if not html:
+            logger.warning(f"Failed to fetch article: {article_title}; skipping")
+            return articles
+
+        discovered = WikipediaArticleScraper.extract_topic_article_urls(html, aria_labelledby)
+        if not discovered:
+            logger.warning("No element found with aria-labelledby=%s in article %s", aria_labelledby, article_title)
+            return articles
+
+        # Progressive persistence: create DB records as soon as titles are discovered.
+        for url in discovered:
+            title = None
+            try:
+                title = unquote(url).replace("/wiki/", "")
+                _postgres.upsert_article_title(title)
+                _postgres.update_article_url(title, url)
+                articles.add(url)
+            except Exception:
+                logger.exception("Failed to upsert article title into PostgreSQL: %s", title or url)
+
+        return articles
+
     def fetch_pages_by_titles(self, urls: Set[str]) -> List[str]:
         """Download multiple Wikipedia articles as HTML files into `ARTICLES_DIR`.
 

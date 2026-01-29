@@ -53,7 +53,7 @@ class WikipediaApiClient:
                 return self.fetch_article(e.options[0])
             logger.warning("Disambiguation for '%s' but no options available", title)
             return None
-        except (PageError, HTTPTimeoutError, WikipediaException) as e:
+        except (PageError, HTTPTimeoutError, WikipediaException, KeyError) as e:
             logger.error("Error fetching page '%s': %s", title, e)
             return None
 

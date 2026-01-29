@@ -1,7 +1,7 @@
 import re
 from typing import Optional, List
 
-from bs4 import Tag
+from bs4 import Tag, BeautifulSoup
 
 from data_ingestion.scraper.base_page_scraper import BasePageScraper
 from data_ingestion.wikipedia_image import WikipediaImage
@@ -134,6 +134,17 @@ class WikipediaArticleScraper(BasePageScraper):
     def _get_visible_text(self) -> str:
         content_el = self.soup.select_one("#mw-content-text")
         return " ".join(content_el.get_text().split()) if content_el else " ".join(self.soup.get_text().split())
+
+    @staticmethod
+    def extract_topic_article_urls(html: str, aria_labelledby: str) -> List[str]:
+        """Return wiki hrefs inside the element matched by aria-labelledby."""
+        soup = BeautifulSoup(html, "html.parser")
+        container = soup.find(attrs={"aria-labelledby": aria_labelledby})
+        if not container:
+            return []
+        hrefs = [a.get("href") for a in container.find_all("a", href=True) if a["href"].startswith("/wiki/")]
+        # Preserve order but deduplicate
+        return list(dict.fromkeys(hrefs))
 
     def texts_chars_count(self, texts: List[str]) -> int:
         texts_len = [len(text) for text in texts]
@@ -456,6 +467,20 @@ class WikipediaArticleScraper(BasePageScraper):
         """Return (image_url, caption) if a table row contains an image, else (None, None)."""
         img = row.select_one("img")
         if not img:
+            return None, None
+
+        # Skip tiny icons: require width or height > 100px when specified
+        def _dim_ok(val: Optional[str]) -> bool:
+            if not val:
+                return True
+            digits = re.findall(r"\d+", str(val))
+            if not digits:
+                return False
+            return int(digits[0]) > 100
+
+        width_ok = _dim_ok(img.get("width"))
+        height_ok = _dim_ok(img.get("height"))
+        if not (width_ok or height_ok):
             return None, None
 
         image_url = self._get_image_url(img)
