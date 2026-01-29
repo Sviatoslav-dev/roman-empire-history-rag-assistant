@@ -7,7 +7,7 @@ Features:
 - Local JSON-backed chat history
 """
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -63,18 +63,15 @@ def _render_message(msg: history_store.ChatMessage, msg_index: int | None = None
             # Show images above the text: hero + smaller thumbnails
             images = [img for img in msg.images if img]
             if msg.role == "assistant" and len(images) > 1:
-                slider_suffix = msg.created_at.replace(":", "-") if msg.created_at else ""
-                slider_key = f"hero_idx_{msg_index}_{slider_suffix}"
-                hero_idx = st.slider("Preview image", 0, len(images) - 1, 0, key=slider_key)
-                hero = images[hero_idx] if 0 <= hero_idx < len(images) else None
-                if hero:
-                    hero_src = _image_src(hero)
-                    if hero_src:
-                        hero_caption = hero.get("caption") or hero.get("page_title")
-                        source = hero.get("url") or hero.get("local_path")
-                        st.image(hero_src, caption=hero_caption or "Image", width=480)
-                        if source:
-                            st.caption(f"Source: {source}")
+                # Show the first image as the hero (no visible slider)
+                hero = images[0]
+                hero_src = _image_src(hero)
+                if hero_src:
+                    hero_caption = hero.get("caption") or hero.get("page_title")
+                    source = hero.get("url") or hero.get("local_path")
+                    st.image(hero_src, caption=hero_caption or "Image", width=480)
+                    if source:
+                        st.caption(f"Source: {source}")
 
                 cols = st.columns(min(5, len(images)))
                 for col, img in zip(cols, images):
@@ -120,7 +117,7 @@ def _prepare_image_payload(images: list[RetrievedImage]) -> list[dict]:
 def _ensure_active_chat(title: str | None = None) -> history_store.Chat:
     if chat := st.session_state.get("active_chat"):
         return chat
-    chat = history_store.create_chat(title or f"Chat {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+    chat = history_store.create_chat(title or f"Chat {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
     st.session_state["active_chat_id"] = chat.id
     st.session_state["active_chat"] = chat
     return chat
@@ -151,25 +148,50 @@ pipeline = get_pipeline()
 # Sidebar: chats management
 with st.sidebar:
     st.header("Chats")
+
+    # keep track of whether the "New chat" form is visible
+    if "show_new_chat" not in st.session_state:
+        st.session_state["show_new_chat"] = False
+
+    # Top-level "New chat" button (like ChatGPT)
+    if st.button("New chat", use_container_width=True, key="new_chat_button"):
+        # Show the new-chat form and prefill the name with a timestamped default
+        st.session_state["show_new_chat"] = True
+        st.session_state["new_chat_name"] = f"Chat {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
+
+    # If user clicked New chat, show a compact form to enter the name + Create/Cancel
+    if st.session_state.get("show_new_chat"):
+        new_title = st.text_input("Chat name", key="new_chat_name")
+        cols = st.columns([3, 1])
+        with cols[0]:
+            if st.button("Create", use_container_width=True, key="create_chat_button"):
+                title = new_title.strip() or f"Chat {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
+                chat = history_store.create_chat(title)
+                st.session_state["active_chat_id"] = chat.id
+                st.session_state["active_chat"] = chat
+                # Clear the temporary name and hide form
+                st.session_state.pop("new_chat_name", None)
+                st.session_state["show_new_chat"] = False
+                st.rerun()
+        with cols[1]:
+            if st.button("Cancel", use_container_width=True, key="cancel_new_chat_button"):
+                # Hide form and clear the temporary name
+                st.session_state["show_new_chat"] = False
+                st.session_state.pop("new_chat_name", None)
+
+    # List chats as a vertical list of buttons (current chat is prefixed with an arrow)
     chats = history_store.list_chats()
-    chat_options = {c.title: c.id for c in chats}
-    selected_title = None
     if chats:
-        selected_title = st.selectbox("Open chat", options=list(chat_options.keys()), index=0)
+        for c in chats:
+            is_active = st.session_state.get("active_chat_id") == c.id
+            label = f"{'➤ ' if is_active else ''}{c.title}"
+            if st.button(label, key=f"open_chat_{c.id}", use_container_width=True):
+                _load_chat(c.id)
+                st.rerun()
     else:
-        st.caption("No chats yet — create one below.")
+        st.info("No chats yet — create one below.")
 
-    if selected_title:
-        _load_chat(chat_options[selected_title])
-
-    with st.expander("New chat"):
-        new_title = st.text_input("Title", value="New chat")
-        if st.button("Create", use_container_width=True, type="primary"):
-            chat = history_store.create_chat(new_title or "Untitled chat")
-            st.session_state["active_chat_id"] = chat.id
-            st.session_state["active_chat"] = chat
-            st.rerun()
-
+    # Delete current chat (kept below the list)
     if st.session_state.get("active_chat_id"):
         if st.button("Delete current chat", use_container_width=True):
             history_store.delete_chat(st.session_state["active_chat_id"])
