@@ -31,7 +31,7 @@ def test_collect_articles_happy_path_wires_everything(collector_mocks) -> None:
 
     categories_file = "cats.txt"
     categories = ["Cat1", "Cat2"]
-    article_titles = ["A", "B"]
+    article_titles = {"A", "B"}
 
     a1 = SimpleNamespace(title="A")
     a2 = SimpleNamespace(title="B")
@@ -79,7 +79,7 @@ def test_collect_articles_happy_path_wires_everything(collector_mocks) -> None:
     chunk_processor.prepare_link_collection.assert_called_once_with(unique_images_by_url)
 
     retriever.add_text_chunks.assert_called_once_with(chunk_texts, chunk_metadata, ids=[0, 1])
-    retriever.add_images.assert_called_once_with(image_paths, image_metadata, ids=[1])
+    retriever.add_images.assert_called_once_with(image_paths, image_metadata, ids=['1'])
     retriever.add_chunk_image_links.assert_called_once_with(links, ids=[0])
 
 
@@ -87,7 +87,7 @@ def test_collect_articles_returns_empty_when_no_article_urls(collector_mocks, mo
     collector, loader, storage, chunk_processor, retriever, article_filter = collector_mocks
 
     loader.load_categories.return_value = ["Cat"]
-    loader.get_all_articles_from_categories.return_value = []
+    loader.get_all_articles_from_categories.return_value = {}
 
     warn = MagicMock()
     monkeypatch.setattr(mod.logger, "warning", warn)
@@ -108,7 +108,7 @@ def test_collect_articles_logs_when_no_valid_categories_but_still_early_exits(co
     collector, loader, storage, chunk_processor, retriever, article_filter = collector_mocks
 
     loader.load_categories.return_value = []
-    loader.get_all_articles_from_categories.return_value = []
+    loader.get_all_articles_from_categories.return_value = {}
 
     warn = MagicMock()
     monkeypatch.setattr(mod.logger, "warning", warn)
@@ -126,7 +126,7 @@ def test_collect_articles_skips_add_images_when_no_image_paths(collector_mocks) 
     a1 = SimpleNamespace(title="A")
 
     loader.load_categories.return_value = ["Cat"]
-    loader.get_all_articles_from_categories.return_value = ["A"]
+    loader.get_all_articles_from_categories.return_value = {"A"}
     storage.get_downloaded_articles.return_value = [a1]
     article_filter.filter_articles.return_value = [a1]
 
@@ -148,7 +148,7 @@ def test_collect_articles_falls_back_when_image_ids_are_not_ints(collector_mocks
     a1 = SimpleNamespace(title="A")
 
     loader.load_categories.return_value = ["Cat"]
-    loader.get_all_articles_from_categories.return_value = ["A"]
+    loader.get_all_articles_from_categories.return_value = {"A"}
     storage.get_downloaded_articles.return_value = [a1]
     article_filter.filter_articles.return_value = [a1]
 
