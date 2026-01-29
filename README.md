@@ -376,7 +376,7 @@ Qdrant collections:
 
 ## Technical Stack
 
-**Language Model:** LLaMA 3 8B
+**Language Model:** Qwen2.5-3B-Instruct
 
 **Text embeddings:** sentence-transformers/all-MiniLM-L6-v2
 
