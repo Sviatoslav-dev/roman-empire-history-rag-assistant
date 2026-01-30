@@ -633,7 +633,11 @@ class WikipediaArticleScraper(BasePageScraper):
         data_rows = []
         for row_index, row in enumerate(rows):
             th_elements = row.find_all("th")
+            td_elements = row.find_all("td")
+
             if not th_elements:
+                if len(td_elements) == 1:
+                    continue
                 data_rows = rows[row_index:]
                 break
 
@@ -799,7 +803,7 @@ class WikipediaArticleScraper(BasePageScraper):
         images_added = 0
 
         for row in rows:
-            key_value = self._infobox_extract_key_value(row)
+            key_value = self._infobox_extract_line(row)
             if key_value:
                 items.append(key_value)
 
@@ -816,27 +820,36 @@ class WikipediaArticleScraper(BasePageScraper):
 
         return "\n".join(items) if items else ""
 
-    def _infobox_extract_key_value(self, row) -> Optional[str]:
-        """Extract a single 'Key: Value' line from an infobox row."""
+    def _infobox_extract_line(self, row) -> Optional[str]:
+        """Extract a single line from an infobox row."""
         header = row.find("th", class_=lambda x: x and "infobox-label" in " ".join(x).lower())
         if not header:
             header = row.find("th")
-        if not header:
-            return None
 
-        key = " ".join(header.get_text().split())
-        if not key:
-            return None
+        key = None
+        if header:
+            key = " ".join(header.get_text().split())
 
-        value_cell = row.find("td")
+        cells = row.find_all("td")
+        value_cell = None
+        if len(cells) == 1:
+            value_cell = cells[0]
+        elif len(cells) == 2:
+            key = " ".join(cells[0].get_text().split())
+            value_cell = cells[1]
+        elif len(cells) > 2:
+            return " ".join([cell.get_text() for cell in cells])
+
         if not value_cell:
-            return None
+            return key
 
         value_text = " ".join(value_cell.get_text().split())
         if not value_text:
-            return None
+            return key
 
-        return f"{key}: {value_text}"
+        if key:
+            return f"{key}: {value_text}"
+        return value_text
 
     def _infobox_maybe_extract_image(self, row, chunk: ArticleChunk) -> bool:
         """Extract an <img> inside an infobox row, if present."""

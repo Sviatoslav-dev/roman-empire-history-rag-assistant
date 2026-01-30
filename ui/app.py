@@ -192,8 +192,8 @@ def _build_chat_history_for_pipeline(messages: list[history_store.ChatMessage]) 
 
 
 # ---- Page layout ----
-st.set_page_config(page_title="Roman Empire RAG Assistant", page_icon="🏛️")
-st.title("🏛️ Roman Empire RAG Assistant")
+st.set_page_config(page_title="Roman Empire Assistant", page_icon="🏛️")
+st.title("Roman Empire RAG Assistant")
 st.caption("Ask questions about the Roman Empire. Attach an image if helpful; answers may include images with source links.")
 
 pipeline = get_pipeline()
