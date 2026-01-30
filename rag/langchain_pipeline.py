@@ -1,20 +1,62 @@
-"""RAG pipeline for question answering."""
-import argparse
-import os
-from typing import Optional, Tuple
-
+from typing import Optional, List, Tuple
 from dotenv import load_dotenv
 
-from rag.langchain_adapter import build_langchain_rag_chain
+from langchain.schema import BaseMessage, HumanMessage, SystemMessage
+from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain.schema.runnable import RunnablePassthrough
+from langchain.schema.output_parser import StrOutputParser
+from langchain.chat_models.base import BaseChatModel
+from pydantic import PrivateAttr
+
+from rag.prompts import RagPrompts, DEFAULT_RAG_PROMPTS
 from rag.rag_model import RetrievedImage, RetrievedContext
 from rag.retriever import QdrantRetriever
-from rag.prompts import DEFAULT_RAG_PROMPTS, RagPrompts
 from rag.llm_client import LLMClient
 from logger import get_logger
+from langchain.schema import ChatResult, ChatGeneration, AIMessage
 
 load_dotenv()
 
 logger = get_logger(__name__)
+
+
+class LangChainLLMWrapper(BaseChatModel):
+    """Wrapper for your existing LLMClient to work with LangChain"""
+    _llm_client: LLMClient = PrivateAttr()
+
+    def __init__(self, llm_client: LLMClient):
+        super().__init__()
+        self._llm_client = llm_client
+
+    def _generate(self, messages: List[BaseMessage], **kwargs):
+        # Extract system prompt if present
+        system_prompt = ""
+        user_prompt = ""
+
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                system_prompt = msg.content
+            elif isinstance(msg, HumanMessage):
+                user_prompt = msg.content
+
+        # Generate using your existing LLMClient
+        answer = self._llm_client.generate(
+            user_prompt,
+            system_prompt=system_prompt,
+            max_new_tokens=kwargs.get('max_new_tokens', 512),
+            temperature=kwargs.get('temperature', 0.1),
+            top_p=kwargs.get('top_p', 0.9),
+        )
+
+
+        # Return LangChain compatible response
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=answer))]
+        )
+
+    @property
+    def _llm_type(self) -> str:
+        return "llm_client_wrapper"
 
 
 class RAGPipeline:
@@ -25,7 +67,45 @@ class RAGPipeline:
         self.llm = LLMClient()
         self.prompts = prompts
 
-    # ---- Small helpers ----
+        # Create LangChain components
+        self.langchain_llm = LangChainLLMWrapper(self.llm)
+        self.output_parser = StrOutputParser()
+
+        # Build the answer generation chain
+        self._build_answer_chain()
+
+    def _build_answer_chain(self):
+        """Build LangChain chain for answer generation"""
+
+        # Define the prompt template
+        self.answer_prompt = ChatPromptTemplate.from_messages([
+            SystemMessagePromptTemplate.from_template(self.prompts.system_prompt),
+            HumanMessagePromptTemplate.from_template(
+                "CONTEXT:\n{context_text}\n\nQUESTION: {question}\nANSWER:"
+            )
+        ])
+
+        # Create the chain
+        self.answer_chain = (
+                RunnablePassthrough()
+                | self.answer_prompt
+                | self.langchain_llm
+                | self.output_parser
+        )
+
+        # Build query rewrite chain
+        self.query_rewrite_prompt = ChatPromptTemplate.from_messages([
+            SystemMessagePromptTemplate.from_template(self.prompts.query_rewrite_system_prompt),
+            HumanMessagePromptTemplate.from_template(self.prompts.query_rewrite_user_template)
+        ])
+
+        self.query_rewrite_chain = (
+                self.query_rewrite_prompt
+                | self.langchain_llm
+                | self.output_parser
+        )
+
+    # ---- Small helpers (unchanged from original) ----
     @staticmethod
     def _build_user_prompt(context_text: str, question: str) -> str:
         return f"CONTEXT:\n{context_text}\n\nQUESTION: {question}\nANSWER:"
@@ -37,12 +117,12 @@ class RAGPipeline:
         return texts, ids
 
     def _retrieve_images_with_links(
-        self,
-        query_image_path: str,
-        top_k_images: int,
-        *,
-        question: str,
-        top_k_links: int = 3,
+            self,
+            query_image_path: str,
+            top_k_images: int,
+            *,
+            question: str,
+            top_k_links: int = 3,
     ) -> tuple[list[RetrievedImage], list[int], dict[int, list[str]]]:
         """Retrieve images, then top linkages (caption-embedded) closest to the question."""
         image_results = self.retriever.search_images(query_image_path, top_k=top_k_images)
@@ -118,10 +198,10 @@ class RAGPipeline:
         return list(images_by_id.values())
 
     def _filter_images_by_caption_similarity(
-        self,
-        question: str,
-        images: list[RetrievedImage],
-        top_k: int | None = None,
+            self,
+            question: str,
+            images: list[RetrievedImage],
+            top_k: int | None = None,
     ) -> list[RetrievedImage]:
         """Keep only images whose caption embeddings are similar to the question."""
         image_ids: list[str] = []
@@ -234,38 +314,32 @@ class RAGPipeline:
         for role, content in recent:
             role_label = "User" if role == "user" else "Assistant"
             lines.append(f"{role_label}: {content}")
-        return "\n".join(lines)
+        return "\n\n".join(lines)
 
     def _rewrite_question(self, question: str, history: list[tuple[str, str]] | None) -> str:
         """Rewrite the question using chat history to make it standalone."""
         if not history:
             return question
+
         history_text = self._format_history(history)
-        user_prompt = self.prompts.query_rewrite_user_template.format(
-            history=history_text,
-            question=question,
-        )
-        rewritten = self.llm.generate(
-            user_prompt,
-            system_prompt=self.prompts.query_rewrite_system_prompt,
-            max_new_tokens=128,
-            temperature=0.2,
-            top_p=0.9,
-        )
+
+        # Use LangChain chain for query rewriting
+        rewritten = self.query_rewrite_chain.invoke({
+            "history": history_text,
+            "question": question
+        })
+
         return rewritten.strip() or question
 
     def generate_answer(
-        self,
-        question: str,
-        top_k_text: int = 5,
-        top_k_images: int = 3,
-        query_image_path: Optional[str] = None,
-        chat_history: Optional[list[tuple[str, str]]] = None,
+            self,
+            question: str,
+            top_k_text: int = 5,
+            top_k_images: int = 3,
+            query_image_path: Optional[str] = None,
+            chat_history: Optional[list[tuple[str, str]]] = None,
     ) -> Tuple[str, RetrievedContext]:
-        """Question -> answer (+ retrieved context).
-
-        Note: conversational history support is intentionally omitted for now.
-        """
+        """Question -> answer (+ retrieved context)."""
 
         rewritten_question = self._rewrite_question(question, chat_history)
 
@@ -275,11 +349,13 @@ class RAGPipeline:
         # Text-only
         if not query_image_path:
             context_text = "\n\n".join(text_chunks_by_text)
-            user_prompt = self._build_user_prompt(context_text, rewritten_question)
-            logger.info("CONTEXT: ", context_text)
-            logger.info("SYSTEM_PROMPT: ", self.prompts.system_prompt)
-            logger.info("USER_PROMPT: ", user_prompt)
-            answer = self.llm.generate(user_prompt, system_prompt=self.prompts.system_prompt)
+
+            # Use LangChain chain for answer generation
+            answer = self.answer_chain.invoke({
+                "context_text": context_text,
+                "question": rewritten_question
+            })
+
             linked_images = self._collect_images_from_text_chunks(text_chunk_ids_by_text)
             linked_images = self._filter_images_by_caption_similarity(
                 rewritten_question, linked_images, top_k=len(linked_images) or None
@@ -309,54 +385,74 @@ class RAGPipeline:
             merged_text_chunks.append(self._attach_captions(chunk_text, chunk_captions.get(cid, [])))
 
         context_text = "\n\n".join(merged_text_chunks)
-        user_prompt = self._build_user_prompt(context_text, rewritten_question)
 
         logger.debug(
             "Built prompt (len=%s). text_chunks=%s; images=%s",
-            len(user_prompt),
+            len(context_text),
             len(merged_text_chunks),
             len(retrieved_images),
         )
 
-        answer = self.llm.generate(user_prompt, system_prompt=self.prompts.system_prompt)
+        # Use LangChain chain for answer generation
+        answer = self.answer_chain.invoke({
+            "context_text": context_text,
+            "question": rewritten_question
+        })
+
         retrieved_images = self._dedupe_images(retrieved_images)
         return answer, RetrievedContext(text_chunks=merged_text_chunks, images=retrieved_images)
 
-
-# ---- Simple runner to quickly try the pipeline locally ----
 if __name__ == "__main__":
+    # pipeline = RAGPipeline()
+    #
+    # # Просте питання без історії
+    # question = "Who was the first Roman Emperor?"
+    #
+    # # Викликаємо генерацію відповіді
+    # answer, context = pipeline.generate_answer(
+    #     question=question,
+    #     top_k_text=3,
+    #     chat_history=None  # Без історії
+    # )
+    #
+    # print(f"Питання: {question}")
+    # print(f"Відповідь: {answer}")
+    # print(f"Знайдено текстових фрагментів: {len(context.text_chunks)}")
+    # print(f"Знайдено зображень: {len(context.images)}")
+
     # Minimal smoke run so you can execute: `python -m rag.pipeline`
     # or `python rag/pipeline.py` from the project root.
-    parser = argparse.ArgumentParser(description="Run RAG pipeline demo")
-    parser.add_argument(
-        "--question", "-q",
-        default=os.environ.get(
-            "RAG_DEMO_QUESTION",
-            "What can you say about this picture?"
-        ),
-        help="Question to ask the RAG pipeline",
-    )
-    parser.add_argument(
-        "--image-path", "-i",
-        default="../tests/data/images/Colosseum_in_Rome,_Italy_-_April_2007.jpg",
-        help="Path to the query image (use --no-image to disable image retrieval)",
-    )
-    parser.add_argument("--no-image", action="store_true", help="Run without image retrieval")
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser(description="Run RAG pipeline demo")
+    # parser.add_argument(
+    #     "--question", "-q",
+    #     default=os.environ.get(
+    #         "RAG_DEMO_QUESTION",
+    #         "What can you say about this picture?"
+    #     ),
+    #     help="Question to ask the RAG pipeline",
+    # )
+    # parser.add_argument(
+    #     "--image-path", "-i",
+    #     default="../tests/data/images/Colosseum_in_Rome,_Italy_-_April_2007.jpg",
+    #     help="Path to the query image (use --no-image to disable image retrieval)",
+    # )
+    # parser.add_argument("--no-image", action="store_true", help="Run without image retrieval")
+    # args = parser.parse_args()
 
-    sample_question = args.question
-    image_path = None if args.no_image else args.image_path
+    # sample_question = "Explain the key reforms of Augustus that transformed the Roman Republic into the Principate. Provide 3–5 bullets and cite specific offices/institutions."#args.question
+    # sample_question = "Explain how the Principate differed from the Roman Republic in terms of political institutions"#args.question
+    # sample_question = "What was the fertility rate in Roman Egypt for ages 32?"#args.question
+    # sample_question = "How much did the Decius Trajanus's antoninianus weight and what was it's diameter?"#args.question
+    # sample_question = "How much did the sestertius with Emperor Maximinus Thrax standing between two legionary banners on Reverse weight during the Military campaigns in the north?"#args.question
+    sample_question = "When did Augustus reign?"  # args.question
+    # sample_question = "Who is the person that stand on the left?"#args.question
+    # sample_question = "What were the fertility rates in Roman Egypt?"#args.question
+    # image_path = "../tests/data/images/Venice_–_The_Tetrarchs_03.jpg" #if args.no_image else args.image_path
+    image_path = None
     logger.info("Running RAG pipeline demo")
 
     pipeline = RAGPipeline()
-    answer, retrieved = pipeline.generate_answer(sample_question, query_image_path=image_path)
-
-    # Optional: LangChain demo if desired
-    if os.environ.get("RAG_USE_LANGCHAIN", "0") == "1":
-        logger.info("Running LangChain RetrievalQA demo")
-        lc_chain = build_langchain_rag_chain(top_k_text=5)
-        lc_result = lc_chain.invoke({"query": sample_question})
-        logger.info("LangChain answer: %s", lc_result.get("result"))
+    answer, retrieved = pipeline.generate_answer(sample_question, query_image_path=image_path, top_k_text=5)
 
     logger.info("Question: %s", sample_question)
     logger.info("Answer: %s", answer)
@@ -377,3 +473,4 @@ if __name__ == "__main__":
                 img.score,
                 img.local_path or img.url or "n/a",
             )
+

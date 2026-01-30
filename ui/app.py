@@ -15,7 +15,7 @@ import urllib.request
 
 import streamlit as st
 
-from rag.pipeline import RAGPipeline
+from rag.langchain_pipeline import RAGPipeline
 from rag.rag_model import RetrievedImage
 from ui import history_store
 
@@ -321,6 +321,8 @@ if user_text:
                     question=user_text,
                     query_image_path=query_image_path,
                     chat_history=chat_history,
+                    top_k_text=5,  # можна змінити
+                    top_k_images=3,  # можна змінити
                 )
 
         # Save assistant message with images
