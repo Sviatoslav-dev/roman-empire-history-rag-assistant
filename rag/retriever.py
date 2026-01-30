@@ -4,6 +4,12 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from qdrant_client.http.exceptions import UnexpectedResponse
+try:
+    # qdrant-client may expose typed index param models; try to import them for type-correct calls
+    from qdrant_client.http.models.models import KeywordIndexParams, IntegerIndexParams  # type: ignore
+except Exception:
+    KeywordIndexParams = None  # type: ignore
+    IntegerIndexParams = None  # type: ignore
 from typing import List, Tuple, Optional
 
 from rag.embedding import TextEmbedder, ImageEmbedder
@@ -87,6 +93,45 @@ class QdrantRetriever:
                 collection_name=LINK_COLLECTION_NAME,
                 vectors_config=VectorParams(size=text_vector_size, distance=Distance.COSINE),
             )
+        try:
+            # image_id: stored as string in payloads (UUID or custom string ids)
+            # Use the typed params if available for better compatibility with qdrant-client.
+            image_index_param = None
+            if KeywordIndexParams is not None:
+                try:
+                    image_index_param = KeywordIndexParams(type="keyword")
+                except Exception:
+                    image_index_param = None
+
+            try:
+                self.client.create_payload_index(
+                    collection_name=LINK_COLLECTION_NAME,
+                    field_name="image_id",
+                    field_schema=image_index_param if image_index_param is not None else "keyword",  # type: ignore[arg-type]
+                )
+            except Exception:
+                # ignore index creation errors - this is best-effort
+                pass
+
+            # text_chunk_id: stored as integer (point id in text collection)
+            int_index_param = None
+            if IntegerIndexParams is not None:
+                try:
+                    int_index_param = IntegerIndexParams(type="integer")
+                except Exception:
+                    int_index_param = None
+
+            try:
+                self.client.create_payload_index(
+                    collection_name=LINK_COLLECTION_NAME,
+                    field_name="text_chunk_id",
+                    field_schema=int_index_param if int_index_param is not None else "integer",  # type: ignore[arg-type]
+                )
+            except Exception:
+                pass
+        except Exception:
+            # Best-effort: do not prevent client initialization if index creation fails.
+            pass
 
     def search_text(
         self,
