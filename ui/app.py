@@ -3,7 +3,7 @@
 Features:
 - Chat messages with optional image uploads
 - Assistant replies can render retrieved images with pinned source links
-- Sidebar chat list with load/delete/new chat controls
+- Single persistent chat (no multiple chats list)
 - Local JSON-backed chat history
 """
 import tempfile
@@ -113,7 +113,38 @@ def _render_message(msg: history_store.ChatMessage, msg_index: int | None = None
                         # If resolved_src is a local file, render it directly and skip remote fetch.
                         if local_src:
                             if caption:
-                                st.image(resolved_src, caption=caption, width=200)
+                                def open_caption(key):
+                                    st.session_state[key] = True
+
+                                def close_caption(key):
+                                    st.session_state[key] = False
+
+                                key = f"caption_open_{hash(resolved_src)}"
+                                st.session_state.setdefault(key, False)
+
+                                st.image(resolved_src, width=200)
+
+                                if len(caption) > 120:
+                                    if st.session_state[key]:
+                                        st.caption(caption)
+                                        st.button(
+                                            "▴ Collapse",
+                                            key=f"btn_close_{key}",
+                                            on_click=close_caption,
+                                            args=(key,),
+                                            type="tertiary",
+                                        )
+                                    else:
+                                        st.caption(caption[:120] + "…")
+                                        st.button(
+                                            "▾ Show more",
+                                            key=f"btn_open_{key}",
+                                            on_click=open_caption,
+                                            args=(key,),
+                                            type="tertiary",
+                                        )
+                                else:
+                                    st.caption(caption)
                             else:
                                 st.image(resolved_src, width=200)
                         else:
@@ -168,18 +199,15 @@ def _prepare_image_payload(images: list[RetrievedImage]) -> list[dict]:
 
 
 def _ensure_active_chat(title: str | None = None) -> history_store.Chat:
+    """Return the single persistent chat, creating it if missing."""
     if chat := st.session_state.get("active_chat"):
         return chat
-    chat = history_store.create_chat(title or f"Chat {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
-    st.session_state["active_chat_id"] = chat.id
+    # Attempt to load existing chat from store
+    chat = history_store.load_chat()
+    if not chat:
+        chat = history_store.create_chat(title or f"Chat {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
     st.session_state["active_chat"] = chat
     return chat
-
-
-def _load_chat(chat_id: str):
-    chat = history_store.load_chat(chat_id)
-    st.session_state["active_chat_id"] = chat_id
-    st.session_state["active_chat"] = chat
 
 
 def _build_chat_history_for_pipeline(messages: list[history_store.ChatMessage]) -> list[tuple[str, str]]:
@@ -191,73 +219,25 @@ def _build_chat_history_for_pipeline(messages: list[history_store.ChatMessage]) 
     return history
 
 
-# ---- Page layout ----
+# ---- Page layout ----n
 st.set_page_config(page_title="Roman Empire Assistant", page_icon="🏛️")
-st.title("Roman Empire RAG Assistant")
+st.title("🏛️ Roman Empire Assistant")
 st.caption("Ask questions about the Roman Empire. Attach an image if helpful; answers may include images with source links.")
 
 pipeline = get_pipeline()
 
-# Sidebar: chats management
-with st.sidebar:
-    st.header("Chats")
-
-    # keep track of whether the "New chat" form is visible
-    if "show_new_chat" not in st.session_state:
-        st.session_state["show_new_chat"] = False
-
-    # Top-level "New chat" button (like ChatGPT)
-    if st.button("New chat", use_container_width=True, key="new_chat_button"):
-        # Show the new-chat form and prefill the name with a timestamped default
-        st.session_state["show_new_chat"] = True
-        st.session_state["new_chat_name"] = f"Chat {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
-
-    # If user clicked New chat, show a compact form to enter the name + Create/Cancel
-    if st.session_state.get("show_new_chat"):
-        new_title = st.text_input("Chat name", key="new_chat_name")
-        cols = st.columns([3, 1])
-        with cols[0]:
-            if st.button("Create", use_container_width=True, key="create_chat_button"):
-                title = new_title.strip() or f"Chat {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
-                chat = history_store.create_chat(title)
-                st.session_state["active_chat_id"] = chat.id
-                st.session_state["active_chat"] = chat
-                # Clear the temporary name and hide form
-                st.session_state.pop("new_chat_name", None)
-                st.session_state["show_new_chat"] = False
-                st.rerun()
-        with cols[1]:
-            if st.button("Cancel", use_container_width=True, key="cancel_new_chat_button"):
-                # Hide form and clear the temporary name
-                st.session_state["show_new_chat"] = False
-                st.session_state.pop("new_chat_name", None)
-
-    # List chats as a vertical list of buttons (current chat is prefixed with an arrow)
-    chats = history_store.list_chats()
-    if chats:
-        for c in chats:
-            is_active = st.session_state.get("active_chat_id") == c.id
-            label = f"{'➤ ' if is_active else ''}{c.title}"
-            if st.button(label, key=f"open_chat_{c.id}", use_container_width=True):
-                _load_chat(c.id)
-                st.rerun()
-    else:
-        st.info("No chats yet — create one below.")
-
-    # Delete current chat (kept below the list)
-    if st.session_state.get("active_chat_id"):
-        if st.button("Delete current chat", use_container_width=True):
-            history_store.delete_chat(st.session_state["active_chat_id"])
-            st.session_state.pop("active_chat_id", None)
-            st.session_state.pop("active_chat", None)
-            st.rerun()
+# # Sidebar: simple control for clearing the chat
+# with st.sidebar:
+#     st.header("Chat")
+#     if st.button("Clear chat", use_container_width=True):
+#         history_store.delete_chat()
+#         st.session_state.pop("active_chat", None)
+#         st.rerun()
 
 # Main chat area
 active_chat: Optional[history_store.Chat] = st.session_state.get("active_chat")
 if active_chat:
     _render_history(active_chat.messages)
-else:
-    st.info("Start a new chat or select one from the sidebar.")
 
 # Input controls
 # Use a placeholder so we can remove/hide the uploader while the assistant is thinking.
